@@ -19,4 +19,4 @@
 
 更换开发机器时，将 Python 包 `lupa==2.6` 安装到本项目 `.tools/python`；布局预览还使用 Pillow 和 Windows 微软雅黑字体。它们都不是插件运行依赖。
 
-本次功能在 `codex/ah-price-level-volatility` 分支开发，以已提交的 0.6.2 为基线。测试包未应用到游戏目录，主分支仍保留 0.6.2。
+本次功能在 `codex/ah-price-level-volatility` 分支开发，以已提交的 0.6.2 为基线。用户已追加授权将功能分支推送并合并到 `main`；版本仍为 `0.7.0-test`，源码合并不代表游戏安装或实机验收。
