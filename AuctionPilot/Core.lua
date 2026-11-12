@@ -1,6 +1,6 @@
 local addonName, A = ...
 A.name = addonName
-A.version = "0.3.0"
+A.version = "0.6.2"
 A.quotes, A.alerts, A.noticeAt = {}, {}, {}
 A.ttl = 120
 A.open = false
@@ -38,9 +38,26 @@ function A.SelectedRecipe(product)
     end
 end
 
+-- Keep the merchant cache bounded by the saved watchlist, including alternate recipes.
+function A.PruneVendorPrices()
+    local tracked = {}
+    for _, product in ipairs(A.profile.products) do
+        tracked[product.itemID] = true
+        for _, recipe in ipairs(product.recipes) do
+            for _, material in ipairs(recipe.materials) do tracked[material.itemID] = true end
+        end
+    end
+    if type(A.profile.vendorPrices) ~= "table" then A.profile.vendorPrices = {} end
+    for id in pairs(A.profile.vendorPrices) do
+        if not tracked[id] then A.profile.vendorPrices[id] = nil end
+    end
+    return tracked
+end
+
 function A.Select(id, recipeID)
     local product = A.Product(id)
     if not product then return end
+    if A.Native then A.Native.pendingPost = nil end
     if recipeID then
         local found = false
         for _, recipe in ipairs(product.recipes) do if recipe.id == recipeID then found = true; break end end
@@ -92,6 +109,7 @@ function A.SaveProduct(draft)
         table.insert(A.profile.products, product)
     end
     A.alerts[product.itemID] = nil
+    A.PruneVendorPrices()
     A.Select(product.id, recipe.id)
     return true
 end
@@ -104,6 +122,7 @@ function A.DeleteRecipe(productID, recipeID)
         if recipe.id == recipeID then
             table.remove(product.recipes, i)
             if product.activeRecipeID == recipeID then product.activeRecipeID = product.recipes[1].id end
+            A.PruneVendorPrices()
             A.RefreshUI()
             return true
         end
@@ -122,6 +141,7 @@ function A.DeleteProduct(id)
     if A.profile.selectedID == id then
         A.profile.selectedID = A.profile.products[1] and A.profile.products[1].id or nil
     end
+    A.PruneVendorPrices()
     A.RefreshUI()
 end
 
@@ -133,14 +153,17 @@ end
 
 function A.EstimateInput(input)
     -- A manual watchlist retains the last complete snapshot, visibly marked by age.
-    local result = A.Logic.Estimate(input, A.quotes, A.Now(), math.huge)
+    local vendorPrices = A.profile and A.profile.vendorPrices
+    local result = A.Logic.Estimate(input, A.quotes, A.Now(), math.huge, nil, nil, vendorPrices)
     local age = 0
     local function include(id)
         local quote = A.quotes[id]
         if quote and quote.complete and not quote.error then age = math.max(age, A.Now() - quote.at) end
     end
     if input.itemID then include(input.itemID) end
-    for _, material in ipairs(input.materials or {}) do if material.source == "market" then include(material.itemID) end end
+    for _, material in ipairs(input.materials or {}) do
+        if A.Logic.UsesMarketPrice(material, vendorPrices) then include(material.itemID) end
+    end
     result.age, result.stale = age, age > A.ttl
     return result
 end
@@ -214,6 +237,7 @@ function A.Initialize()
         AuctionPilotDB.profiles[key] = profile
     end
     A.profile = profile
+    A.PruneVendorPrices()
     A.History.Initialize()
     A.UI.Build()
     A.Widgets.InstallItemLinks()
@@ -226,7 +250,8 @@ for _, event in ipairs({ "ADDON_LOADED", "PLAYER_LOGIN", "AUCTION_HOUSE_SHOW", "
     "COMMODITY_SEARCH_RESULTS_UPDATED", "COMMODITY_SEARCH_RESULTS_ADDED",
     "ITEM_SEARCH_RESULTS_UPDATED", "ITEM_SEARCH_RESULTS_ADDED", "BAG_UPDATE_DELAYED",
     "GET_ITEM_INFO_RECEIVED", "ITEM_DATA_LOAD_RESULT", "AUCTION_HOUSE_AUCTION_CREATED",
-    "AUCTION_HOUSE_THROTTLED_SYSTEM_READY", "AUCTION_HOUSE_SHOW_ERROR" }) do
+    "AUCTION_HOUSE_THROTTLED_SYSTEM_READY", "AUCTION_HOUSE_SHOW_ERROR",
+    "PLAYER_MONEY", "PLAYER_REGEN_DISABLED", "PLAYER_REGEN_ENABLED", "MERCHANT_SHOW", "MERCHANT_UPDATE" }) do
     events:RegisterEvent(event)
 end
 events:SetScript("OnEvent", function(_, event, ...)
@@ -236,17 +261,22 @@ events:SetScript("OnEvent", function(_, event, ...)
         A.Initialize()
         if not A.profile then return end
         A.open, A.quotes, A.alerts, A.noticeAt = true, {}, {}, {}
+        A.Native.OnEvent(event)
         A.Market.Pause()
         C_Timer.After(0, function() if A.open then A.Native.Attach(); A.RefreshUI() end end)
     elseif event == "AUCTION_HOUSE_CLOSED" then
         A.open = false
+        A.Native.OnEvent(event)
         A.Market.Pause()
         if A.UI and A.UI.frame then A.UI.frame:Hide() end
     elseif A.profile then
+        A.Native.OnEvent(event, ...)
         A.History.OnEvent(event, ...)
         A.Market.OnEvent(event, ...)
         if event == "BAG_UPDATE_DELAYED" or event == "GET_ITEM_INFO_RECEIVED"
-            or event == "ITEM_DATA_LOAD_RESULT" or event == "AUCTION_HOUSE_AUCTION_CREATED" then
+            or event == "ITEM_DATA_LOAD_RESULT" or event == "AUCTION_HOUSE_AUCTION_CREATED"
+            or event == "PLAYER_MONEY" or event == "PLAYER_REGEN_DISABLED" or event == "PLAYER_REGEN_ENABLED"
+            or event == "AUCTION_HOUSE_THROTTLED_SYSTEM_READY" then
             A.RefreshUI()
         end
     end

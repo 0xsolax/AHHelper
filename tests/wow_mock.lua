@@ -43,6 +43,7 @@ function Frame:Show()
 end
 function Frame:Hide()
     local changed = self.shown; self.shown = false
+    if MOCK.menu and not MOCK.menu.owner:IsVisible() then MOCK.menu = nil end
     if changed and self.scripts.OnHide then self.scripts.OnHide(self) end
 end
 function Frame:SetShown(show) if show then self:Show() else self:Hide() end end
@@ -58,6 +59,8 @@ function Frame:SetUserText(text)
     if self.scripts.OnTextChanged then self.scripts.OnTextChanged(self, true) end
 end
 function Frame:GetText() return self.text end
+function Frame:SetNumber(value) self:SetText(tostring(value)) end
+function Frame:GetNumber() return tonumber(self.text) or 0 end
 function Frame:SetEnabled(enabled) self.enabled = enabled end
 function Frame:IsEnabled() return self.enabled end
 function Frame:SetChecked(value) self.checked = value end
@@ -66,7 +69,18 @@ function Frame:SetFont(font, size) self.fontSize = size end
 function Frame:GetFont() return "MockChineseFont", self.fontSize, "" end
 function Frame:SetTextColor(...) self.color = {...} end
 function Frame:SetJustifyH(value) self.justify = value end
+function Frame:SetWordWrap(value) self.wordWrap = value end
+function Frame:GetUnboundedStringWidth()
+    if MOCK.measureText then return MOCK.measureText(self.text, self.fontSize) end
+    local width = 0
+    for char in self.text:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
+        width = width + self.fontSize * (#char > 1 and 1 or 0.55)
+    end
+    return width
+end
 function Frame:SetTexture(value) self.texture = value end
+function Frame:SetNormalTexture(value) self.normalTexture = value end
+function Frame:SetPushedTexture(value) self.pushedTexture = value end
 function Frame:SetColorTexture(...) self.fill = {...} end
 function Frame:SetBackdropColor(...) self.fill = {...} end
 function Frame:SetBackdropBorderColor(...) self.border = {...} end
@@ -97,10 +111,14 @@ function Frame:SetClampedToScreen(value) self.clamped = value end
 function Frame:GetScale() return self.scale or 1 end
 function Frame:GetEffectiveScale() return self:GetScale() * (self.parent and self.parent:GetEffectiveScale() or 1) end
 function Frame:Click()
-    if self.enabled and self:IsVisible() and self.scripts.OnClick then self.scripts.OnClick(self, "LeftButton") end
+    if self.enabled and self:IsVisible() and self.scripts.OnClick then
+        local previous = MOCK.hardware; MOCK.hardware = true
+        self.scripts.OnClick(self, "LeftButton")
+        MOCK.hardware = previous
+    end
 end
 function Frame:RegisterEvent(event) self.registered = self.registered or {}; self.registered[event] = true end
-for _, method in ipairs({"SetAutoFocus", "SetFontObject", "SetMaxLetters", "SetWordWrap", "SetFrameStrata",
+for _, method in ipairs({"SetAutoFocus", "SetFontObject", "SetMaxLetters", "SetFrameStrata",
     "EnableMouse", "RegisterForDrag", "StartMoving",
     "StopMovingOrSizing", "SetHighlightTexture", "SetHitRectInsets", "SetCursorPosition", "SetOwner",
     "SetItemByID", "AddLine"}) do Frame[method] = function() end end
@@ -109,10 +127,32 @@ UIParent = make("Frame", "UIParent"); UIParent:SetSize(1600, 1000)
 GameFontHighlight = {}
 GameTooltip = make("Frame", "GameTooltip"); GameTooltip:Hide()
 UISpecialFrames, SlashCmdList, StaticPopupDialogs = {}, {}, {}
+MenuUtil = {}
+function MenuUtil.CreateContextMenu(owner, generator)
+    local menu = {owner = owner, entries = {}}
+    function menu:SetScrollMode(height) self.scrollHeight = height end
+    function menu:CreateTitle(text) table.insert(self.entries, {kind = "title", text = text}) end
+    function menu:CreateDivider() table.insert(self.entries, {kind = "divider"}) end
+    function menu:CreateButton(text, callback)
+        local entry = {kind = "button", text = text, callback = callback}
+        function entry:Click()
+            if owner:IsVisible() then MOCK.menu = nil; self.callback() end
+        end
+        table.insert(self.entries, entry); return entry
+    end
+    function menu:CreateRadio(text, selected, callback)
+        local entry = self:CreateButton(text, callback)
+        entry.kind, entry.selected = "radio", selected
+        return entry
+    end
+    generator(owner, menu); MOCK.menu = menu
+    return menu
+end
 tinsert = table.insert
 strmatch = string.match
 function GetTime() return MOCK.time end
 function GetServerTime() return MOCK.serverTime or 1794450000 end
+function GetMoney() return MOCK.money or 10000000 end
 date = os.date
 function GetRealmName() return "TestRealm" end
 function UnitGUID() return "TestCharacter" end
@@ -126,7 +166,21 @@ end}
 function InCombatLockdown() return MOCK.combat or false end
 function GetCursorInfo() return unpack(MOCK.cursor or {}) end
 function ClearCursor() MOCK.cursor = nil end
-function StaticPopup_Show(which, _, _, data) MOCK.popup = {which = which, data = data} end
+function StaticPopup_Show(which, text, _, data) MOCK.popup = {which = which, text = text, data = data} end
+function StaticPopup_Visible(which) return MOCK.popup and MOCK.popup.which == which end
+function StaticPopup_Hide(which)
+    if not StaticPopup_Visible(which) then return end
+    local popup = MOCK.popup; MOCK.popup = nil
+    local definition = StaticPopupDialogs[which]
+    if definition and definition.OnHide then definition.OnHide(popup, popup.data) end
+end
+function MOCK.acceptPopup()
+    local popup = assert(MOCK.popup)
+    MOCK.hardware = true
+    StaticPopupDialogs[popup.which].OnAccept(popup, popup.data)
+    MOCK.hardware = nil
+    StaticPopup_Hide(popup.which)
+end
 DEFAULT_CHAT_FRAME = {AddMessage = function(_, text) table.insert(MOCK.messages, text) end}
 SOUNDKIT = {TELL_MESSAGE = 3081}
 function PlaySound() MOCK.sounds = (MOCK.sounds or 0) + 1 end
@@ -143,10 +197,21 @@ WOW_PROJECT_ID, WOW_PROJECT_CAMELOT, WOW_PROJECT_MAINLINE = 3, 3, 1
 Enum = {BagIndex = {ReagentBag = 4}, AuctionHouseSortOrder = {Price = 0},
     ItemCommodityStatus = {Unknown = 0, Item = 1, Commodity = 2}}
 C_Timer = {
-    After = function(_, callback) table.insert(MOCK.timers, callback) end,
+    After = function(delay, callback)
+        if delay == 0 then table.insert(MOCK.timers, callback)
+        else
+            MOCK.delayed = MOCK.delayed or {}
+            table.insert(MOCK.delayed, {at = MOCK.time + delay, callback = callback})
+        end
+    end,
     NewTicker = function(_, callback) table.insert(MOCK.tickers, callback); return {} end,
 }
 function MOCK.flush()
+    for i = #(MOCK.delayed or {}), 1, -1 do
+        if MOCK.delayed[i].at <= MOCK.time then
+            table.insert(MOCK.timers, table.remove(MOCK.delayed, i).callback)
+        end
+    end
     for _ = 1, 20 do
         if #MOCK.timers == 0 then return end
         local pending = MOCK.timers; MOCK.timers = {}
@@ -163,10 +228,14 @@ C_Item = {
     end,
     RequestLoadItemDataByID = function() end,
     GetItemCount = function(id) return id == 1 and 120 or 80 end,
+    DoesItemExist = function() return not MOCK.removed end,
+    GetItemID = function() return MOCK.bagItemID or 1 end,
+    GetItemGUID = function() return not MOCK.removed and (MOCK.itemGUID or "Item-1") or nil end,
+    GetItemLink = function() return not MOCK.coldItem and "item:" .. (MOCK.bagItemID or 1) or nil end,
 }
 C_Container = {
     GetContainerNumSlots = function(bag) return bag == 0 and 1 or 0 end,
-    GetContainerItemInfo = function() return {itemID = 1, isLocked = MOCK.locked} end,
+    GetContainerItemInfo = function() return {itemID = MOCK.bagItemID or 1, isLocked = MOCK.locked} end,
 }
 Enum.TooltipDataType = {Item = 0}
 TooltipDataProcessor = {callbacks = {}}
@@ -189,38 +258,100 @@ function MOCK.bagTooltip(itemID, bag)
     for _, callback in ipairs(TooltipDataProcessor.callbacks) do callback(GameTooltip, {id = itemID}) end
     return GameTooltip.lines
 end
-ItemLocation = {CreateFromBagAndSlot = function(_, bag, slot) return {bag = bag, slot = slot} end}
+ItemLocation = {CreateFromBagAndSlot = function(_, bag, slot)
+    return {bag = bag, slot = slot, GetBagAndSlot = function(self) return self.bag, self.slot end}
+end}
+local function post(kind, item, duration, quantity, price, bid)
+    assert(MOCK.hardware, "Transaction without a hardware click")
+    MOCK.postCalls = MOCK.postCalls + 1
+    MOCK.lastPost = {kind=kind,item=item,duration=duration,quantity=quantity,price=price,bid=bid}
+    if MOCK.onPost then MOCK.onPost() end
+    return MOCK.needsConfirmation or false
+end
 C_AuctionHouse = {
     MakeItemKey = function(id) return {itemID = id} end,
-    GetItemKeyInfo = function() return {isCommodity = true} end,
+    GetItemKeyFromItem = function() return {itemID=MOCK.bagItemID or 1,itemSuffix=MOCK.itemSuffix or 0} end,
+    GetItemKeyInfo = function()
+        if MOCK.keyInfo == false then return nil end
+        return MOCK.keyInfo or {isCommodity = true}
+    end,
     IsThrottledMessageSystemReady = function() return MOCK.ready ~= false end,
     SendSearchQuery = function(key) table.insert(MOCK.queries, key.itemID) end,
-    SupportsCopperValues = function() return false end,
+    SupportsCopperValues = function() return MOCK.copper == true end,
     IsSellItemValid = function() return not MOCK.bound end,
-    GetAvailablePostCount = function() return 120 end,
+    GetAvailablePostCount = function() return MOCK.availableCount or 120 end,
     GetItemCommodityStatus = function() return MOCK.commodityStatus or 2 end,
-    PostCommodity = function() MOCK.postCalls = MOCK.postCalls + 1 end,
-    PostItem = function() MOCK.postCalls = MOCK.postCalls + 1 end,
+    CalculateCommodityDeposit = function(id,duration,quantity)
+        if MOCK.depositMissing then return nil end
+        return MOCK.deposit or 75 * duration * quantity
+    end,
+    CalculateItemDeposit = function(item,duration,quantity)
+        if MOCK.depositMissing then return nil end
+        return MOCK.deposit or 100 * duration * quantity
+    end,
+    GetAuctionInfoByID = function() return MOCK.auctionInfo end,
+    PostCommodity = function(item,duration,quantity,price) return post("commodity",item,duration,quantity,price) end,
+    PostItem = function(item,duration,quantity,bid,buyout) return post("item",item,duration,quantity,buyout,bid) end,
+    ConfirmPostCommodity = function(item,duration,quantity,price) return post("confirmCommodity",item,duration,quantity,price) end,
+    ConfirmPostItem = function(item,duration,quantity,bid,buyout) return post("confirmItem",item,duration,quantity,buyout,bid) end,
+    StartCommoditiesPurchase = function() MOCK.purchaseCalls = (MOCK.purchaseCalls or 0) + 1 end,
+    ConfirmCommoditiesPurchase = function() MOCK.purchaseCalls = (MOCK.purchaseCalls or 0) + 1 end,
+    PlaceBid = function() MOCK.purchaseCalls = (MOCK.purchaseCalls or 0) + 1 end,
 }
+AuctionHouseUtil = {GetErrorText = function(code) return "拍卖行错误 " .. tostring(code) end}
 AuctionHouseFrame = make("Frame", "AuctionHouseFrame", UIParent)
 AuctionHouseFrame:SetSize(850, 600)
 AuctionHouseFrame.Tabs = {make("Button", nil, AuctionHouseFrame), make("Button", nil, AuctionHouseFrame), make("Button", nil, AuctionHouseFrame)}
-AuctionHouseFrameDisplayMode = {Buy = {"Buy"}, ItemSell = {"ItemSell"}, CommoditiesSell = {"CommoditiesSell"}, Auctions = {"Auctions"}}
-function AuctionHouseFrame:SetDisplayMode(mode) self.displayMode = mode end
+AuctionHouseFrameDisplayMode = {Buy = {"Buy"}, ItemBuy = {"ItemBuy"}, CommoditiesBuy = {"CommoditiesBuy"},
+    ItemSell = {"ItemSell"}, CommoditiesSell = {"CommoditiesSell"}, Auctions = {"Auctions"}}
+function AuctionHouseFrame:SetDisplayMode(mode)
+    self.displayMode = mode
+    if self.CommoditiesSellFrame then
+        self.CommoditiesSellFrame:SetShown(mode == AuctionHouseFrameDisplayMode.CommoditiesSell)
+        self.ItemSellFrame:SetShown(mode == AuctionHouseFrameDisplayMode.ItemSell)
+    end
+end
 function AuctionHouseFrame:GetDisplayMode() return self.displayMode end
 function AuctionHouseFrame:SetTitle(title) self.title = title end
+function AuctionHouseFrame:SelectBrowseResult(result)
+    if MOCK.rejectBuy then error("Native selection failed") end
+    self.buyResult = result
+    local info = C_AuctionHouse.GetItemKeyInfo(result.itemKey)
+    self:SetDisplayMode(info.isCommodity and AuctionHouseFrameDisplayMode.CommoditiesBuy or AuctionHouseFrameDisplayMode.ItemBuy)
+    -- The native buy list's OnShow refreshes its exact item, independently of the monitor queue.
+    MOCK.nativeQueries = MOCK.nativeQueries or {}
+    table.insert(MOCK.nativeQueries, result.itemKey.itemID)
+end
 local function sellForm()
-    return {GetItem = function(self) return self.item end,
-        QuantityInput = {SetQuantity = function(self, value) self.value = value end},
-        PriceInput = {SetAmount = function(self, value) self.value = value end},
-        UpdatePostState = function(self) self.updated = true end}
+    local form = make("Frame", nil, AuctionHouseFrame); form:Hide()
+    form.QuantityInput = {InputBox = make("EditBox", nil, form), MaxButton = make("Button", nil, form)}
+    function form.QuantityInput:SetQuantity(value) self.value = value; self.InputBox:SetNumber(value) end
+    function form.QuantityInput:GetQuantity() return self.InputBox:GetNumber() end
+    form.PriceInput = {MoneyInputFrame = {GoldBox = make("EditBox", nil, form),
+        SilverBox = make("EditBox", nil, form), CopperBox = make("EditBox", nil, form)}}
+    function form.PriceInput:SetAmount(value) self.value = value end
+    function form.PriceInput:GetAmount() return self.value end
+    form.Duration = {Dropdown = make("Button", nil, form), value = 2}
+    function form.Duration:SetDuration(value) self.value = value end
+    function form.Duration:GetDuration() return self.value end
+    function form.Duration.Dropdown:GenerateMenu() end
+    form.ItemDisplay = {ItemButton = make("Button", nil, form)}
+    function form.ItemDisplay:GetItemLink() if not MOCK.coldItem and not MOCK.coldDisplay then return "item:1" end end
+    function form:GetItem() return self.item end
+    function form:GetQuantity() return self.QuantityInput:GetQuantity() end
+    function form:UpdatePostState() self.updated = true end
+    return form
 end
 AuctionHouseFrame.CommoditiesSellFrame = sellForm()
 AuctionHouseFrame.ItemSellFrame = sellForm()
 function AuctionHouseFrame:SetPostItem(item)
+    MOCK.nativeSetPostCalls = (MOCK.nativeSetPostCalls or 0) + 1
     if MOCK.rejectPostItem then return end
     local isCommodity = C_AuctionHouse.GetItemCommodityStatus(item) == 2
     self:SetDisplayMode(isCommodity and AuctionHouseFrameDisplayMode.CommoditiesSell or AuctionHouseFrameDisplayMode.ItemSell)
     local form = isCommodity and self.CommoditiesSellFrame or self.ItemSellFrame
     form.item = item
+    -- Native SetItem resets quantity, then commodities replace it with the bag stack count.
+    form.QuantityInput:SetQuantity(isCommodity and (MOCK.stackCount or 120) or 1)
+    form.PriceInput:SetAmount(0)
 end

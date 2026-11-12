@@ -1,8 +1,8 @@
 ## Interface: 16001
 ## Title: 拍卖助手 AuctionPilot
-## Notes: 读取配方与利润、背包历史价格、Shift 点击录入、原生拍卖行嵌入
+## Notes: 总成本利润、材料来源下拉与商店提醒、最低档采购额、原生上架准备
 ## Author: Solazhu
-## Version: 0.3.0
+## Version: 0.6.2
 ## SavedVariables: AuctionPilotDB
 ## OptionalDeps: Blizzard_AuctionHouseUI
 

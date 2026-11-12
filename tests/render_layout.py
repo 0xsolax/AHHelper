@@ -9,10 +9,18 @@ sys.path.insert(0, str(ROOT / ".tools" / "python"))
 from lupa.lua51 import LuaRuntime
 from PIL import Image, ImageDraw, ImageFont
 
+FONT = "C:/Windows/Fonts/msyh.ttc"
+FONT_BOLD = "C:/Windows/Fonts/msyhbd.ttc"
+@lru_cache(None)
+def font(size, bold=False):
+    return ImageFont.truetype(FONT_BOLD if bold else FONT, max(9, int(size)))
+
 lua = LuaRuntime(unpack_returned_tuples=True)
 lua.globals().PROJECT_ROOT = ROOT.as_posix()
+lua.globals().measurePreviewText = lambda text, size: font(size).getlength(text)
 lua.execute('''
 dofile(PROJECT_ROOT .. "/tests/wow_mock.lua")
+MOCK.measureText = measurePreviewText
 local A = {}
 for _, file in ipairs({"Libs/LibStub.lua", "Libs/LibAHTab.lua", "Logic.lua", "Core.lua", "History.lua", "Market.lua",
     "Native.lua", "Widgets.lua", "Editor.lua", "UI.lua"}) do
@@ -28,7 +36,7 @@ assert(A.SaveProduct({id=1,itemID=1,recipeName="另一生产方案（示例）",
 assert(A.SaveProduct({itemID=4, recipeName="默认配方", output=1, fee=5, extra=0, alert=true,
     materials={{itemID=2,quantity=1,source="fixed",price=3400}}}))
 A.Select(1,1)
-for id, price in pairs({[1]=12000,[2]=4200,[4]=4000,[5]=1200}) do
+for id, price in pairs({[1]=12000,[2]=4200,[3]=8,[4]=4000,[5]=1200}) do
     A.AcceptQuote(id,A.Logic.Snapshot({{price=price,quantity=200,own=id==1 and 40 or 0}},MOCK.time,true))
 end
 A.AcceptQuote(1,A.Logic.Snapshot({{price=12000,quantity=280,own=40}},MOCK.time,true))
@@ -36,13 +44,7 @@ A.UI.quantity:SetText("20")
 MOCK.addon = A
 ''')
 
-FONT = "C:/Windows/Fonts/msyh.ttc"
-FONT_BOLD = "C:/Windows/Fonts/msyhbd.ttc"
-@lru_cache(None)
-def font(size, bold=False):
-    return ImageFont.truetype(FONT_BOLD if bold else FONT, max(9, int(size)))
-
-def render(path, native=False):
+def render(path, native=False, menu=False):
     frames = list(lua.globals().MOCK.frames.values())
     by_id = {int(f.index): f for f in frames}
     bounds = {}
@@ -118,10 +120,22 @@ def render(path, native=False):
                 if f.text and not f.label:
                     ff=font(14*scale*effective_scale(f)); tw=draw.textlength(str(f.text),font=ff)
                     draw.text((x+max(4,(w-tw)/2),y+max(0,(h-20)/2)),str(f.text),font=ff,fill="#e4d8bc")
+            if f.template == "RefreshButtonTemplate":
+                ink = "#dcc388" if f.enabled else "#69665c"
+                draw.arc((x+w*.24,y+h*.24,x+w*.76,y+h*.76),35,320,fill=ink,width=max(1,int(w*.055)))
+                draw.polygon([(x+w*.72,y+h*.25),(x+w*.83,y+h*.45),(x+w*.59,y+h*.43)],fill=ink)
+            if f.normalTexture and "ScrollDown-Up" in f.normalTexture:
+                draw.polygon([(x+w*.3,y+h*.4),(x+w*.7,y+h*.4),(x+w*.5,y+h*.65)],fill="#dcc388")
             if f.kind == "CheckButton" and f.checked:
                 draw.line([(x+5,y+12),(x+12,y+20),(x+26,y+5)],fill="#e2b858",width=3)
         elif f.kind == "Texture" and f.fill:
             draw.rectangle(box, outline="#7b642d", width=1)
+        elif f.kind == "Texture" and f.texture:
+            if isinstance(f.texture,str) and "ScrollDown-Up" in f.texture:
+                draw.polygon([(x+w*.2,y+h*.3),(x+w*.8,y+h*.3),(x+w*.5,y+h*.7)],fill="#dcc388")
+            else:
+                draw.rectangle(box, fill="#292b26", outline="#766c4f", width=1)
+                draw.text((x+w*.25,y+h*.1),"?",font=font(h*.6),fill="#c3b99f")
     overflow = []
     for f in frames:
         if not visible(f) or f.kind != "FontString" or not f.text: continue
@@ -129,7 +143,9 @@ def render(path, native=False):
         fill=color(f.color,(229,219,192)); text=str(f.text)
         lines=[]
         for raw in text.split("\n"):
-            if f.width and draw.textlength(raw,font=ff)>w:
+            if f.width and f.wordWrap is False and draw.textlength(raw,font=ff)>w+2:
+                overflow.append("single-line text: " + raw)
+            if f.width and draw.textlength(raw,font=ff)>w and f.wordWrap is not False:
                 line=""
                 for char in raw:
                     if line and draw.textlength(line+char,font=ff)>w: lines.append(line); line=""
@@ -141,12 +157,69 @@ def render(path, native=False):
             tx=x+max(0,w-tw) if f.justify=="RIGHT" else x
             draw.text((tx,y),line,font=ff,fill=fill); y+=ff.size*1.4
         if x < -1 or x+w > image.width+2 or y > image.height+8: overflow.append(text)
+    if menu:
+        entries = list(lua.globals().MOCK.menu.entries.values())
+        menu_font = font(16)
+        menu_width = max(draw.textlength(str(e.text or ""),font=menu_font) for e in entries) + 60
+        menu_height = sum(12 if e.kind == "divider" else 30 for e in entries)
+        owner = lua.globals().MOCK.menu.owner
+        x,y,w,h = coords(owner)
+        x = max(8,min(x+24,image.width-menu_width-16)); y = min(y+h,image.height-menu_height-30)
+        draw.rectangle((x,y,x+menu_width,y+menu_height),fill="#151613",outline="#b79a56",width=2)
+        for entry in entries:
+            if entry.kind == "divider":
+                draw.line((x+10,y+6,x+menu_width-10,y+6),fill="#635940"); y += 12
+                continue
+            if entry.kind == "radio":
+                draw.ellipse((x+10,y+10,x+19,y+19),outline="#bda367",fill="#d3b46c" if entry.selected() else None)
+            draw.text((x+28,y+5),str(entry.text),font=menu_font,fill="#dbbd77" if entry.kind=="title" else "#e4d8bc")
+            y += 30
     path.parent.mkdir(parents=True,exist_ok=True)
     image.save(path)
     print(path.name, "viewport overflows:", overflow)
+    if overflow:
+        raise AssertionError(f"{path.name}: {overflow}")
 
 render(ROOT / "design" / "offline-docked-list.png", native=True)
+lua.execute('''
+MOCK.addon.SelectedRecipe().materials[2].source = "market"
+MOCK.addon.profile.vendorPrices[3] = {price=30,stackCount=5,seenAt=GetServerTime()}
+MOCK.addon.RefreshUI()
+''')
+render(ROOT / "design" / "offline-docked-vendor.png", native=True)
+lua.execute('MOCK.addon.Editor.Open(MOCK.addon.Selected())')
+render(ROOT / ".tools" / "layout-checks" / "vendor-editor.png", native=True)
+lua.execute('MOCK.addon.Editor.rows[2].sourceButton:Click()')
+render(ROOT / "design" / "offline-source-menu.png", native=True, menu=True)
+lua.execute('MOCK.menu.entries[2]:Click()')
+render(ROOT / ".tools" / "layout-checks" / "ah-source-editor.png", native=True)
+lua.execute('MOCK.addon.Editor.Close(); MOCK.addon.SelectedRecipe().materials[2].source="fixed"; MOCK.addon.RefreshUI()')
+lua.execute('MOCK.addon.UI.duration:Click()')
+render(ROOT / ".tools" / "layout-checks" / "duration-menu.png", native=True, menu=True)
+lua.execute('MOCK.menu=nil; MOCK.money=1; MOCK.addon.RefreshUI()')
+render(ROOT / ".tools" / "layout-checks" / "deposit-shortage.png", native=True)
+lua.execute('MOCK.money=nil; MOCK.addon.RefreshUI()')
+lua.execute('MOCK.addon.UI.productRows[1].menu:Click()')
+render(ROOT / "design" / "offline-docked-menu.png", native=True, menu=True)
+lua.execute('MOCK.menu = nil')
 lua.execute('MOCK.addon.Editor.Open(MOCK.addon.Selected())')
 render(ROOT / "design" / "offline-docked-editor.png", native=True)
+lua.execute('MOCK.addon.Editor.Close(); MOCK.time = MOCK.time + 130; MOCK.addon.RefreshUI()')
+render(ROOT / ".tools" / "layout-checks" / "stale.png", native=True)
+lua.execute('MOCK.addon.quotes[2].complete = false; MOCK.addon.quotes[2].error = "材料行情未完成"; MOCK.addon.RefreshUI()')
+render(ROOT / ".tools" / "layout-checks" / "missing.png", native=True)
+lua.execute('''
+MOCK.addon.SelectedRecipe().name = "手动选取的另一套黄铁矿与空瓶生产配方"
+MOCK.items[1] = "需要检查显示宽度的很长的中文成品名称"
+MOCK.addon.UI.refresh:Click()
+''')
+render(ROOT / ".tools" / "layout-checks" / "loading-long-names.png", native=True)
+lua.execute('''
+MOCK.addon.Market.Pause(); MOCK.time = MOCK.time - 130
+MOCK.addon.SelectedRecipe().name = "专业硫酸 #900"; MOCK.items[1] = "硫酸"
+MOCK.addon.quotes[2].complete = true; MOCK.addon.quotes[2].error = nil; MOCK.addon.RefreshUI()
+''')
 lua.execute('MOCK.addon.Editor.Close(); MOCK.addon.open=false; MOCK.addon.UI.frame:SetParent(UIParent); MOCK.addon.UI.Layout()')
 render(ROOT / "design" / "offline-standalone.png")
+lua.execute('MOCK.addon.DeleteProduct(1); MOCK.addon.DeleteProduct(2); MOCK.addon.open=true; MOCK.addon.Native.ShowMonitor(); MOCK.flush()')
+render(ROOT / ".tools" / "layout-checks" / "empty.png", native=True)

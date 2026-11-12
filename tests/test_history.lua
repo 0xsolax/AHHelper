@@ -75,7 +75,7 @@ test("native item prices use per-item buyout and ignore bid-only auctions", func
     itemRows = {{itemKey=key,buyoutAmount=100000,quantity=20},
         {itemKey=key,buyoutAmount=18000,quantity=4},{itemKey=key,minBid=1,quantity=1}}
     event("ITEM_SEARCH_RESULTS_UPDATED",key)
-    eq(record(4).price,4500); eq(#MOCK.queries,0)
+    eq(record(4).price,18000); eq(#MOCK.queries,0)
     local saved = record(4)
     itemRows[1].itemKey = {itemID=4,itemSuffix=9}
     event("ITEM_SEARCH_RESULTS_ADDED",key); eq(record(4),saved)
@@ -106,14 +106,26 @@ test("missing commodity rows cannot fall through to unrelated item results", fun
     C_AuctionHouse.GetItemSearchResultInfo = getItems
 end)
 
-test("fractional unit prices are marked rounded and never look free", function()
+test("wizard oil history matches native unit prices regardless of grouped stock", function()
     itemInfo = {isCommodity=false}
-    local key = {itemID=5,itemLevel=0,itemSuffix=0,battlePetSpeciesID=0}
-    itemRows = {{itemKey=key,buyoutAmount=1,quantity=2}}
+    local key = {itemID=20744,itemLevel=0,itemSuffix=0,battlePetSpeciesID=0}
+    itemRows = {{itemKey=key,buyoutAmount=290,quantity=1},
+        {itemKey=key,buyoutAmount=300,quantity=234},{itemKey=key,buyoutAmount=500,quantity=18}}
     event("ITEM_SEARCH_RESULTS_UPDATED",key)
-    eq(record(5).price,0.5); eq(MOCK.bagTooltip(5)[2][2],"不足1铜")
-    itemRows[1].buyoutAmount = 3; event("ITEM_SEARCH_RESULTS_UPDATED",key)
-    eq(MOCK.bagTooltip(5)[2][2],"约 2铜")
+    eq(record(20744).price,290); eq(MOCK.bagTooltip(20744)[2][2],"2银90铜")
+    itemRows[2].quantity = 300; event("ITEM_SEARCH_RESULTS_UPDATED",key)
+    eq(record(20744).price,290)
+end)
+
+test("legacy mispriced history is retained but withheld until a fresh complete quote", function()
+    local legacy = {price=1.5,seenAt=MOCK.serverTime-20}
+    A.profile.lastSeenPrices[5] = legacy
+    local lines = MOCK.bagTooltip(5)
+    eq(lines[2][2],"请在拍卖行刷新"); eq(record(5),legacy)
+    local q = quote(290); q.complete = false; A.AcceptQuote(5,q)
+    eq(record(5),legacy)
+    A.AcceptQuote(5,quote(290)); eq(record(5).priceVersion,2)
+    eq(MOCK.bagTooltip(5)[2][2],"2银90铜")
 end)
 
 test("a complete empty result records no buyout rather than a zero price", function()

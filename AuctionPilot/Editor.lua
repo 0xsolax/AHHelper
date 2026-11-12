@@ -2,6 +2,7 @@ local _, A = ...
 local E = { rows = {} }
 A.Editor = E
 local W = A.Widgets
+local sourceNames = {market = "自动", auction = "AH价", vendor = "商店价", fixed = "固定价"}
 
 function E.Read()
     local draft = { id = E.id, itemID = E.item.itemID, output = tonumber(E.output:GetText()),
@@ -26,7 +27,8 @@ function E.Preview()
     for _, row in ipairs(E.rows) do
         if row:IsShown() then
             index = index + 1
-            if row.source == "market" then row.price:SetCopper(estimate.materials[index] and estimate.materials[index].unit) end
+            if row.source ~= "fixed" then row.price:SetCopper(estimate.materials[index] and estimate.materials[index].unit) end
+            row.sourceButton:SetText(sourceNames[row.source] or "选择来源")
         end
     end
     E.warning:SetText(estimate.error or (estimate.stale and "历史测算 · " or "")
@@ -35,7 +37,7 @@ function E.Preview()
     W.Amount(E.sale, estimate.sale)
     W.Amount(E.cost, estimate.cost)
     W.Amount(E.cut, estimate.fee)
-    W.Amount(E.net, estimate.net)
+    W.Amount(E.gross, estimate.gross)
     W.Amount(E.profit, estimate.unitProfit, true)
     E.profit:SetText(E.profit:GetText() .. " / 件")
     E.roi:SetText(estimate.roi and string.format("%.1f%%", estimate.roi) or "--")
@@ -63,13 +65,33 @@ function E.AddMaterial(material)
         row.item = W.ItemInput(row, 260, E.Preview); row.item:SetPoint("LEFT", 0, 0)
         row.quantity = W.Edit(row, 48, "1"); row.quantity:SetPoint("LEFT", 281, 0)
         row.quantity:SetScript("OnTextChanged", E.Preview)
-        row.sourceButton = W.Button(row, "拍卖行", 92, 26, function()
-            row.source = row.source == "market" and "fixed" or "market"
-            row.sourceButton:SetText(row.source == "market" and "拍卖行" or "固定价")
-            row.price:SetEnabled(row.source == "fixed")
-            E.Preview()
+        row.sourceButton = W.Button(row, "自动", 92, 26, function(owner)
+            if not MenuUtil or not MenuUtil.CreateContextMenu then E.error:SetText("菜单尚未载入，请重载界面后重试。"); return end
+            MenuUtil.CreateContextMenu(owner, function(_, menu)
+                for _, key in ipairs({"market", "auction", "vendor", "fixed"}) do
+                    local source = key
+                    menu:CreateRadio(source == "market" and "自动（商店优先）" or sourceNames[source],
+                        function() return row.source == source end, function()
+                            row.source = source
+                            row.price:SetEnabled(source == "fixed")
+                            E.Preview()
+                        end)
+                end
+            end)
         end)
         row.sourceButton:SetPoint("LEFT", 346, 0)
+        local sourceText = row.sourceButton:GetFontString()
+        sourceText:ClearAllPoints(); sourceText:SetPoint("LEFT", 8, 0)
+        sourceText:SetWidth(66); sourceText:SetJustifyH("LEFT"); sourceText:SetWordWrap(false)
+        local arrow = row.sourceButton:CreateTexture(nil, "OVERLAY")
+        arrow:SetTexture("Interface\\ChatFrame\\UI-ChatIcon-ScrollDown-Up")
+        arrow:SetSize(16, 16); arrow:SetPoint("RIGHT", -1, 0)
+        row.sourceButton:SetScript("OnEnter", function(owner)
+            GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
+            GameTooltip:SetText("自动：商店价优先，没有记录则用 AH。\nAH价：只用拍卖行报价。\n商店价：只用商店记录，缺价时等待采集。\n固定价：手动填写采购单价。")
+            GameTooltip:Show()
+        end)
+        row.sourceButton:SetScript("OnLeave", function() GameTooltip:Hide() end)
         row.price = W.MoneyInput(row, E.Preview); row.price:SetPoint("LEFT", 444, 0)
         row.remove = W.Button(row, "移除", 40, 24, function() row:Hide(); E.ArrangeRows() end)
         row.remove:SetPoint("RIGHT", 0, 0)
@@ -81,7 +103,7 @@ function E.AddMaterial(material)
     row.item:SetItem(material and material.itemID)
     row.quantity:SetText(material and tostring(material.quantity) or "1")
     row.source = material and material.source or "market"
-    row.sourceButton:SetText(row.source == "market" and "拍卖行" or "固定价")
+    row.sourceButton:SetText(sourceNames[row.source] or "选择来源")
     row.price:SetCopper(material and material.price or nil)
     row.price:SetEnabled(row.source == "fixed")
     E.loading = wasLoading
@@ -189,11 +211,11 @@ function E.Build(parent)
         return value
     end
     E.sale = previewRow("售价 / 件", 70)
-    E.cost = previewRow("成本 / 次", 108)
-    E.cut = previewRow("成交抽成 / 次", 146)
-    E.net = previewRow("预计到手 / 次", 203)
+    E.cost = previewRow("总成本 / 次", 108)
+    E.cut = previewRow("其中手续费 / 次", 146)
+    E.gross = previewRow("销售总额 / 次", 203)
     E.profit = W.Label(preview, "-- / 件", 20, 259, 30, W.green, 316)
-    E.roi = previewRow("成本利润率", 320)
+    E.roi = previewRow("总成本利润率", 320)
     E.warning = W.Label(preview, "", 20, 375, 13, W.muted, 316)
     E.error = W.Label(frame, "", 8, 515, 13, W.red, 700)
     E.delete = W.Button(frame, "删除配方", 100, 30, function()

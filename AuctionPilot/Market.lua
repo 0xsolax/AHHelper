@@ -10,30 +10,52 @@ function M.Pause()
     M.queue, M.active = {}, nil
 end
 
-function M.RequestRefresh(scope, productID)
+local function enqueue(items)
     if not M.IsVisible() then return nil, "请在拍卖行打开监控面板。" end
     if M.active or #M.queue > 0 then return nil, "正在更新，请稍候。" end
+    local queue, seen = {}, {}
+    for _, id in ipairs(items) do
+        if not seen[id] then seen[id] = true; table.insert(queue, id) end
+    end
+    if #queue == 0 then return nil, "没有需要查询的拍卖行报价。" end
+    M.queue = queue
+    A.RefreshUI()
+    return true
+end
+
+function M.RequestItem(itemID)
+    local id = A.Logic.ItemID(itemID)
+    if not id then return nil, "物品编号无效。" end
+    return enqueue({id})
+end
+
+function M.RequestRefresh(scope, productID, recipeID)
     scope = scope or "all"
     if scope ~= "all" and scope ~= "sale" and scope ~= "materials" then return nil, "刷新范围无效。" end
-    local seen = {}
-    local function add(id)
-        if not seen[id] then seen[id] = true; table.insert(M.queue, id) end
-    end
+    if recipeID and not productID then return nil, "请先选择产品和配方。" end
+    local items = {}
     for _, product in ipairs(A.profile.products) do
         if not productID or product.id == productID then
-            if scope ~= "materials" then add(product.itemID) end
+            if recipeID then
+                local found = false
+                for _, recipe in ipairs(product.recipes) do if recipe.id == recipeID then found = true; break end end
+                if not found then return nil, "配方已不存在，请重新选择。" end
+            end
+            if scope ~= "materials" then table.insert(items, product.itemID) end
             if scope ~= "sale" then
                 for _, recipe in ipairs(product.recipes) do
-                    for _, material in ipairs(recipe.materials) do
-                        if material.source == "market" then add(material.itemID) end
+                    if not recipeID or recipe.id == recipeID then
+                        for _, material in ipairs(recipe.materials) do
+                            if A.Logic.UsesMarketPrice(material, A.profile.vendorPrices) then
+                                table.insert(items, material.itemID)
+                            end
+                        end
                     end
                 end
             end
         end
     end
-    if #M.queue == 0 then return nil, scope == "materials" and "没有需要查询的拍卖行材料。" or "请先添加监控产品。" end
-    A.RefreshUI()
-    return true
+    return enqueue(items)
 end
 
 local function fail(message)
@@ -46,14 +68,9 @@ local function fail(message)
     A.RefreshUI()
 end
 
-local function finish(rows, commodity)
+local function finish(rows)
     local id = M.active.itemID
     local quote = A.Logic.Snapshot(rows, A.Now(), true)
-    quote.commodity = commodity
-    if not commodity then
-        table.sort(rows, function(a, b) return a.price < b.price end)
-        quote.lots = rows
-    end
     M.active = nil
     A.AcceptQuote(id, quote)
 end
@@ -72,7 +89,7 @@ function M.ReadCommodity()
             table.insert(rows, { price = entry.unitPrice, quantity = entry.quantity, own = entry.numOwnerItems })
         end
     end
-    finish(rows, true)
+    finish(rows)
 end
 
 function M.ReadItem()
@@ -86,12 +103,13 @@ function M.ReadItem()
             -- Never mix level/suffix variants into a generic material's cost.
             local key = entry.itemKey
             if key.itemID == active.itemID and (key.itemSuffix or 0) == 0 and (key.battlePetSpeciesID or 0) == 0 then
-                table.insert(rows, { price = entry.buyoutAmount / entry.quantity, quantity = entry.quantity,
+                -- Native item results group identical offers; buyoutAmount is already the unit buyout.
+                table.insert(rows, { price = entry.buyoutAmount, quantity = entry.quantity,
                     own = entry.containsOwnerItem and entry.quantity or 0 })
             end
         end
     end
-    finish(rows, false)
+    finish(rows)
 end
 
 function M.OnEvent(event, arg)

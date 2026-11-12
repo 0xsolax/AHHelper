@@ -21,8 +21,8 @@ local function quotes()
 end
 test("known profit and seller fee", function()
     local e = L.Estimate(product, quotes(), 100, 120)
-    eq(e.cost, 8600); eq(e.fee, 600); eq(e.net, 11400); eq(e.profit, 2800)
-    eq(string.format("%.1f", e.roi), "32.6")
+    eq(e.cost, 9200); eq(e.fee, 600); eq(e.net, 11400); eq(e.profit, 2800)
+    eq(string.format("%.1f", e.roi), "30.4")
 end)
 test("quantity-aware procurement walks price tiers", function()
     local q = quotes()
@@ -30,12 +30,11 @@ test("quantity-aware procurement walks price tiers", function()
     local e = L.Estimate(product, q, 100, 120)
     eq(e.materialCost, 800)
 end)
-test("non-commodity lots must be bought whole", function()
+test("grouped item offers charge only the required quantity", function()
     local q = quotes()
-    q[2].commodity = false
-    q[2].lots = {{price = 100, quantity = 20, own = 0}}
+    q[2] = quote({{price = 100, quantity = 20}})
     local e = L.Estimate(product, q, 100, 120)
-    eq(e.cost, 2200); eq(e.materials[1].purchased, 20)
+    eq(e.cost, 1000); eq(e.materials[1].cost, 200)
 end)
 test("empty output market cannot manufacture a sale price", function()
     local q = quotes(); q[1] = quote({})
@@ -45,8 +44,23 @@ end)
 test("zero total cost leaves rate undefined rather than infinity", function()
     local p = L.Copy(product)
     for _, m in ipairs(p.materials) do m.source, m.price = "fixed", 0 end
+    p.fee = 0
     local e = L.Estimate(p, quotes(), 100, 120)
-    eq(e.roi, nil); eq(e.profit, 11400)
+    eq(e.roi, nil); eq(e.profit, 12000)
+end)
+
+test("total-cost return includes selling fees without deducting them twice", function()
+    local p = L.Copy(product)
+    p.materials = {{itemID=2,quantity=1,source="fixed",price=800000}}
+    local e = L.Estimate(p, quotes(), 100, 120, 1, 1000000)
+    eq(e.cost,850000); eq(e.profit,150000); eq(e.unitCost,850000)
+    eq(string.format("%.2f",e.roi),"17.65")
+    p.materials[1].price = 0
+    e = L.Estimate(p,quotes(),100,120,1,1000000)
+    eq(e.cost,50000); eq(e.roi,1900)
+    p.materials[1].price = 1000000
+    e = L.Estimate(p,quotes(),100,120,1,1000000)
+    eq(e.profit,-50000); assert(e.roi < 0)
 end)
 test("invalid explicit selling prices are rejected", function()
     local e = L.Estimate(product, quotes(), 100, 120, 1, -1)
@@ -55,7 +69,7 @@ end)
 test("own material auctions cannot fund procurement", function()
     local q = quotes()
     q[2] = quote({{price = 1, quantity = 10, own = 10}, {price = 4200, quantity = 2}})
-    eq(L.Estimate(product, q, 100, 120).cost, 8600)
+    eq(L.Estimate(product, q, 100, 120).cost, 9200)
 end)
 test("insufficient material yields no fabricated profit", function()
     local q = quotes(); q[2] = quote({{price = 10, quantity = 1}})
@@ -80,12 +94,12 @@ end)
 test("output and extra loss are apportioned per unit", function()
     local p = L.Copy(product); p.output = 2; p.extra = 100
     local e = L.Estimate(p, quotes(), 100, 120)
-    eq(e.cost, 8700); eq(e.fee, 1200); eq(e.profit, 14100); eq(e.unitProfit, 7050)
+    eq(e.cost, 9900); eq(e.fee, 1200); eq(e.profit, 14100); eq(e.unitProfit, 7050)
 end)
 test("batch procurement is not naive multiplication", function()
     local q = quotes(); q[2] = quote({{price = 4200, quantity = 2}, {price = 5000, quantity = 50}})
     local e = L.Estimate(product, q, 100, 120, 2)
-    eq(e.cost, 18800); eq(e.profit, 4000)
+    eq(e.cost, 20000); eq(e.profit, 4000)
 end)
 test("reject invalid counts fees duplicates and self materials", function()
     for _, value in ipairs({0, -1, 1.5, math.huge, "junk"}) do
@@ -228,6 +242,39 @@ test("refresh scopes deduplicate all recipe materials and skip fixed prices", fu
     eq(M.RequestRefresh("all"),nil); eq(#M.queue,count)
     M.Pause(); eq(M.RequestRefresh("bad"),nil); eq(#M.queue,0)
     eq(M.RequestRefresh("all",999),nil); eq(#M.queue,0)
+end)
+
+test("wizard oil grouped offers retain their native buyout prices", function()
+    M.Pause()
+    local key = {itemID=20744,itemLevel=0,itemSuffix=0,battlePetSpeciesID=0}
+    local results = {
+        {itemKey=key,buyoutAmount=290,quantity=1},
+        {itemKey=key,buyoutAmount=300,quantity=234},
+        {itemKey=key,buyoutAmount=500,quantity=18},
+        {itemKey=key,minBid=1,quantity=1},
+    }
+    C_AuctionHouse.HasFullItemSearchResults = function() return true end
+    C_AuctionHouse.GetNumItemSearchResults = function() return #results end
+    C_AuctionHouse.GetItemSearchResultInfo = function(_, i) return results[i] end
+    M.active = {itemID=20744,key=key,started=now}
+    M.OnEvent("ITEM_SEARCH_RESULTS_UPDATED",key)
+    local snapshot = A.quotes[20744]
+    eq(snapshot.levels[1].price,290)
+    eq(snapshot.levels[2].price,300); eq(snapshot.levels[2].quantity,234)
+    eq(L.PurchaseCost(snapshot,2),590)
+end)
+
+test("targeted refreshes select one recipe or one item without expanding the scope", function()
+    A.profile.products[1].recipes[2].id = 2
+    M.Pause(); assert(M.RequestRefresh("all",1,1)); eq(table.concat(M.queue,","),"1,2")
+    M.Pause(); assert(M.RequestRefresh("all",1,2)); eq(table.concat(M.queue,","),"1,4,2")
+    M.Pause(); assert(M.RequestRefresh("all",1)); eq(table.concat(M.queue,","),"1,2,4")
+    M.Pause(); assert(M.RequestItem(3)); eq(table.concat(M.queue,","),"3")
+    eq(M.RequestRefresh("all",1,1),nil); eq(table.concat(M.queue,","),"3")
+    M.Pause(); eq(M.RequestRefresh("all",1,999),nil); eq(#M.queue,0)
+    eq(M.RequestRefresh("all",nil,1),nil); eq(M.RequestItem("bad"),nil); eq(#M.queue,0)
+    A.open = false; eq(M.RequestItem(2),nil); eq(M.RequestRefresh("all",1,1),nil)
+    eq(#M.queue,0); A.open = true
 end)
 
 print("TOTAL " .. passed .. " tests passed")

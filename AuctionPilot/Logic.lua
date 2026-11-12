@@ -67,7 +67,8 @@ function L.Validate(product)
         if product.itemID == material.itemID then return nil, "成品与材料不能是同一物品。" end
         seen[material.itemID] = true
         if not L.Number(material.quantity, 1, 100000, true) then return nil, "材料用量须为大于零的整数。" end
-        if material.source ~= "market" and material.source ~= "fixed" then return nil, "请选择材料价格来源。" end
+        if material.source ~= "market" and material.source ~= "auction"
+            and material.source ~= "vendor" and material.source ~= "fixed" then return nil, "请选择材料价格来源。" end
         if material.source == "fixed" and not L.Number(material.price, 0, 1000000000000, true) then
             return nil, "请输入有效的固定采购价。"
         end
@@ -103,17 +104,6 @@ end
 
 function L.PurchaseCost(snapshot, quantity)
     local remaining, cost = quantity, 0
-    if snapshot.commodity == false then
-        local purchased = 0
-        for _, lot in ipairs(snapshot.lots or {}) do
-            if (lot.own or 0) == 0 then
-                cost = cost + lot.price * lot.quantity
-                purchased = purchased + lot.quantity
-                if purchased >= quantity then return math.ceil(cost), purchased end
-            end
-        end
-        return nil, purchased
-    end
     for _, level in ipairs(snapshot.levels) do
         local take = math.min(remaining, level.available)
         cost = cost + take * level.price
@@ -123,7 +113,20 @@ function L.PurchaseCost(snapshot, quantity)
     return nil, quantity - remaining
 end
 
-function L.Estimate(product, quotes, now, ttl, batches, saleOverride)
+function L.VendorPrice(material, prices)
+    local entry = type(prices) == "table" and prices[material.itemID]
+    if (material.source ~= "market" and material.source ~= "vendor") or type(entry) ~= "table"
+        or not L.Number(entry.price, 1, 1000000000000, true)
+        or not L.Number(entry.stackCount, 1, 100000, true)
+        or not L.Number(entry.seenAt, 1, 9007199254740991, true) then return nil end
+    return entry
+end
+
+function L.UsesMarketPrice(material, prices)
+    return material.source == "auction" or (material.source == "market" and not L.VendorPrice(material, prices))
+end
+
+function L.Estimate(product, quotes, now, ttl, batches, saleOverride, vendorPrices)
     local valid, err = L.Validate(product)
     if not valid then return { error = err, materials = {} } end
     batches = batches or 1
@@ -142,16 +145,22 @@ function L.Estimate(product, quotes, now, ttl, batches, saleOverride)
     for _, material in ipairs(product.materials) do
         local quantity = material.quantity * batches
         local row = { itemID = material.itemID, quantity = quantity, source = material.source }
+        local vendor = L.VendorPrice(material, vendorPrices)
         if material.source == "fixed" then
             row.cost = material.price * quantity
             row.unit = material.price
+        elseif vendor then
+            row.source, row.unit = "vendor", vendor.price / vendor.stackCount
+            row.cost = math.ceil(vendor.price * quantity / vendor.stackCount)
+        elseif material.source == "vendor" then
+            row.error = "未记录商店价，请打开对应商店。"
         else
+            row.source = "market"
             local quote = quotes[material.itemID]
             if not L.Fresh(quote, now, ttl) then
                 row.error = quote and quote.error or "缺价或已过期"
             else
                 row.cost, row.available = L.PurchaseCost(quote, quantity)
-                row.purchased = row.cost and row.available or nil
                 row.unit = row.cost and row.cost / quantity or nil
                 if not row.cost then row.error = "可买数量不足" end
             end
@@ -168,8 +177,12 @@ function L.Estimate(product, quotes, now, ttl, batches, saleOverride)
         return { error = "金额超出精确计算范围", materials = result.materials }
     end
     result.fee = math.ceil(result.gross * product.fee / 100)
+    result.cost = result.cost + result.fee
+    if result.cost > 9007199254740991 then
+        return { error = "金额超出精确计算范围", materials = result.materials }
+    end
     result.net = result.gross - result.fee
-    result.profit = result.net - result.cost
+    result.profit = result.gross - result.cost
     result.unitCost = result.cost / result.output
     result.unitProfit = result.profit / result.output
     result.roi = result.cost > 0 and result.profit / result.cost * 100 or nil

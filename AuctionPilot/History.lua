@@ -9,7 +9,7 @@ local function save(itemID, price)
     local records = A.profile and A.profile.lastSeenPrices
     if type(records) ~= "table" then return end
     -- GetTime resets with the session; history needs an absolute timestamp.
-    records[itemID] = { price = price, seenAt = GetServerTime() }
+    records[itemID] = { price = price, seenAt = GetServerTime(), priceVersion = 2 }
 end
 
 function H.AcceptQuote(itemID, quote)
@@ -57,7 +57,7 @@ function H.OnEvent(event, arg)
             price = row.unitPrice
         elseif row.buyoutAmount and row.buyoutAmount ~= 0 then
             if not validPrice(row.buyoutAmount) then return end
-            price = row.buyoutAmount / row.quantity
+            price = row.buyoutAmount
         end
         if price then minimum = minimum and math.min(minimum, price) or price end
     end
@@ -73,8 +73,14 @@ function H.AddTooltip(tooltip, data)
     if not L.Number(bag, 0, lastBag, true) then return end
     local records = A.profile.lastSeenPrices
     local entry = type(records) == "table" and data and L.ItemID(data.id) and records[data.id]
-    if type(entry) ~= "table" or not L.Number(entry.seenAt, 1, 100000000000, true)
-        or (entry.price ~= nil and not validPrice(entry.price)) then return end
+    if type(entry) ~= "table" or not L.Number(entry.seenAt, 1, 100000000000, true) then return end
+    if entry.priceVersion ~= 2 then
+        -- Old saves do not identify commodity versus grouped-item prices, so none can be safely converted.
+        tooltip:AddLine(" ")
+        tooltip:AddDoubleLine("拍卖助手 · 旧版价格记录", "请在拍卖行刷新", 0.89, 0.75, 0.47, 1, 0.73, 0.28)
+        return
+    end
+    if entry.price ~= nil and not validPrice(entry.price) then return end
     local priceText = "无一口价"
     if entry.price then
         priceText = entry.price < 1 and "不足1铜"
