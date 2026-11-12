@@ -179,4 +179,20 @@ test("late warnings results and timers never cause addon transaction calls",func
     eq(MOCK.nativeSetPostCalls,1)
 end)
 
+test("automatic refresh pauses throughout native sell handoff and resumes without posting",function()
+    local M = A.Market
+    C_AuctionHouse.HasFullCommoditySearchResults = function() return true end
+    C_AuctionHouse.GetNumCommoditySearchResults = function() return 1 end
+    C_AuctionHouse.GetCommoditySearchResultInfo = function() return {unitPrice=12000,quantity=100} end
+    assert(M.SetAuto(true)); M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1)
+    local count = #MOCK.queries
+    MOCK.coldDisplay = true; click(); assert(A.Native.pendingPost)
+    eq(M.auto,true); eq(A.activity[1].previous,nil)
+    MOCK.time = 103; M.Tick(); eq(#MOCK.queries,count)
+    MOCK.flush(); MOCK.time = 110; M.Tick(); eq(#MOCK.queries,count)
+    A.Native.ShowMonitor(); MOCK.flush(); M.Tick(); eq(M.active.itemID,1)
+    M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1); eq(A.activity[1].result,nil)
+    M.SetAuto(false); eq(MOCK.nativeSetPostCalls,1)
+end)
+
 print(string.format("TOTAL %d native-handoff tests passed",passed))

@@ -102,6 +102,34 @@ function L.Fresh(snapshot, now, ttl)
         and now >= snapshot.at and now - snapshot.at <= ttl
 end
 
+-- Compare the union of exact prices inside the SAME reference range, including own stock.
+function L.Activity(previous, current, reference)
+    if not previous or not current or not previous.complete or not current.complete
+        or previous.error or current.error or not reference then return nil end
+    local changes, before, after = {}, 0, 0
+    for _, level in ipairs(previous.levels) do
+        if level.price <= reference then
+            changes[level.price] = -level.quantity
+            before = before + level.quantity
+        end
+    end
+    for _, level in ipairs(current.levels) do
+        if level.price <= reference then
+            changes[level.price] = (changes[level.price] or 0) + level.quantity
+            after = after + level.quantity
+        end
+    end
+    local increase, decrease = 0, 0
+    for _, delta in pairs(changes) do
+        increase = increase + math.max(0, delta)
+        decrease = decrease + math.max(0, -delta)
+    end
+    local average = (before + after) / 2
+    return { increase = increase, decrease = decrease, previousQuantity = before, quantity = after,
+        rate = average > 0 and (increase + decrease) / average * 100 or nil,
+        reference = reference, from = previous.at, at = current.at }
+end
+
 function L.PurchaseCost(snapshot, quantity)
     local remaining, cost = quantity, 0
     for _, level in ipairs(snapshot.levels) do

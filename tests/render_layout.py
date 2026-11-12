@@ -39,7 +39,11 @@ A.Select(1,1)
 for id, price in pairs({[1]=12000,[2]=4200,[3]=8,[4]=4000,[5]=1200}) do
     A.AcceptQuote(id,A.Logic.Snapshot({{price=price,quantity=200,own=id==1 and 40 or 0}},MOCK.time,true))
 end
-A.AcceptQuote(1,A.Logic.Snapshot({{price=12000,quantity=280,own=40}},MOCK.time,true))
+MOCK.time = MOCK.time + 30
+A.AcceptQuote(1,A.Logic.Snapshot({{price=11950,quantity=50},{price=12000,quantity=180,own=40}},MOCK.time,true))
+A.AcceptQuote(4,A.Logic.Snapshot({{price=4000,quantity=150}},MOCK.time,true))
+A.Market.auto, A.Market.nextAuto = true, MOCK.time + 30
+A.RefreshUI()
 A.UI.quantity:SetText("20")
 MOCK.addon = A
 ''')
@@ -181,6 +185,20 @@ def render(path, native=False, menu=False):
         raise AssertionError(f"{path.name}: {overflow}")
 
 render(ROOT / "design" / "offline-docked-list.png", native=True)
+lua.execute('''
+local A = MOCK.addon
+MOCK.previewActivity, MOCK.previewQuotes, MOCK.previewTime = A.Logic.Copy(A.activity), A.Logic.Copy(A.quotes), MOCK.time
+MOCK.time = MOCK.time + 30
+A.AcceptQuote(1,A.Logic.Snapshot({{price=11950,quantity=1000000000}},MOCK.time,true))
+MOCK.time = MOCK.time + 30
+A.AcceptQuote(1,A.Logic.Snapshot({{price=11900,quantity=1000000000}},MOCK.time,true))
+''')
+render(ROOT / ".tools" / "layout-checks" / "activity-large.png", native=True)
+lua.execute('''
+local A = MOCK.addon
+A.activity, A.quotes, MOCK.time = MOCK.previewActivity, MOCK.previewQuotes, MOCK.previewTime
+A.RefreshUI()
+''')
 lua.execute('''
 MOCK.addon.SelectedRecipe().materials[2].source = "market"
 MOCK.addon.profile.vendorPrices[3] = {price=30,stackCount=5,seenAt=GetServerTime()}

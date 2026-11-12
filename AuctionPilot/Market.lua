@@ -1,13 +1,39 @@
 local _, A = ...
-local M = { queue = {}, active = nil, nextSend = 0 }
+local M = { queue = {}, active = nil, nextSend = 0, auto = false }
 A.Market = M
 
 function M.IsVisible()
     return A.open and A.UI and A.UI.frame and A.UI.frame:IsShown()
+        and (not A.UI.main or A.UI.main:IsShown())
+        and not (A.Editor and A.Editor.frame and A.Editor.frame:IsShown())
+        and not (A.Native and A.Native.pendingPost)
 end
 
 function M.Pause()
+    -- Search events have no request token. Drain an in-flight response before reusing its item key.
+    if M.active then M.draining = M.active end
     M.queue, M.active = {}, nil
+    M.batchAuto, M.nextAuto = false, nil
+    if A.BreakActivity then A.BreakActivity(nil, "已暂停") end
+end
+
+function M.SetAuto(enabled)
+    if enabled and not M.IsVisible() then return nil, "请在拍卖行打开监控列表。" end
+    if enabled and (M.active or #M.queue > 0) then return nil, "正在更新，请稍候。" end
+    M.auto, M.nextAuto = enabled == true, nil
+    if M.auto then
+        if A.BreakActivity then A.BreakActivity(nil, "采样中") end
+        M.Tick()
+    elseif M.batchAuto then M.Pause() end
+    A.RefreshUI()
+    return true
+end
+
+local function roundFinished()
+    if not M.active and #M.queue == 0 then
+        M.batchAuto = false
+        M.nextAuto = M.auto and A.Now() + 30 or nil
+    end
 end
 
 local function enqueue(items)
@@ -18,7 +44,7 @@ local function enqueue(items)
         if not seen[id] then seen[id] = true; table.insert(queue, id) end
     end
     if #queue == 0 then return nil, "没有需要查询的拍卖行报价。" end
-    M.queue = queue
+    M.queue, M.batchAuto = queue, false
     A.RefreshUI()
     return true
 end
@@ -64,7 +90,9 @@ local function fail(message)
     local old = A.quotes[active.itemID]
     A.quotes[active.itemID] = { levels = old and old.levels or {}, at = old and old.at or 0,
         complete = false, error = message }
+    if A.BreakActivity then A.BreakActivity(active.itemID, "查询失败") end
     M.active = nil
+    roundFinished()
     A.RefreshUI()
 end
 
@@ -72,6 +100,7 @@ local function finish(rows)
     local id = M.active.itemID
     local quote = A.Logic.Snapshot(rows, A.Now(), true)
     M.active = nil
+    roundFinished()
     A.AcceptQuote(id, quote)
 end
 
@@ -85,9 +114,11 @@ function M.ReadCommodity()
     local rows = {}
     for i = 1, C_AuctionHouse.GetNumCommoditySearchResults(active.itemID) do
         local entry = C_AuctionHouse.GetCommoditySearchResultInfo(active.itemID, i)
-        if entry then
-            table.insert(rows, { price = entry.unitPrice, quantity = entry.quantity, own = entry.numOwnerItems })
+        if not entry or not A.Logic.Number(entry.unitPrice, 1, 1000000000000, true)
+            or not A.Logic.Number(entry.quantity, 1, 1000000000, true) then
+            fail("行情明细不完整，请重试"); return
         end
+        table.insert(rows, { price = entry.unitPrice, quantity = entry.quantity, own = entry.numOwnerItems })
     end
     finish(rows)
 end
@@ -99,7 +130,11 @@ function M.ReadItem()
     local rows = {}
     for i = 1, C_AuctionHouse.GetNumItemSearchResults(active.key) do
         local entry = C_AuctionHouse.GetItemSearchResultInfo(active.key, i)
-        if entry and entry.buyoutAmount and entry.buyoutAmount > 0 and entry.quantity > 0 then
+        if not entry or not entry.itemKey or not A.Logic.Number(entry.quantity, 1, 1000000000, true)
+            or (entry.buyoutAmount and not A.Logic.Number(entry.buyoutAmount, 0, 1000000000000, true)) then
+            fail("行情明细不完整，请重试"); return
+        end
+        if entry.buyoutAmount and entry.buyoutAmount > 0 then
             -- Never mix level/suffix variants into a generic material's cost.
             local key = entry.itemKey
             if key.itemID == active.itemID and (key.itemSuffix or 0) == 0 and (key.battlePetSpeciesID or 0) == 0 then
@@ -112,24 +147,47 @@ function M.ReadItem()
     finish(rows)
 end
 
+local function resultKind(event, arg, active)
+    if (event == "COMMODITY_SEARCH_RESULTS_UPDATED" or event == "COMMODITY_SEARCH_RESULTS_ADDED")
+        and arg == active.itemID then return "commodity"
+    elseif (event == "ITEM_SEARCH_RESULTS_UPDATED" or event == "ITEM_SEARCH_RESULTS_ADDED")
+        and arg and arg.itemID == active.itemID then return "item" end
+end
+
 function M.OnEvent(event, arg)
+    if M.draining then
+        local kind = resultKind(event, arg, M.draining)
+        if event == "AUCTION_HOUSE_SHOW_ERROR"
+            or (kind == "commodity" and C_AuctionHouse.HasFullCommoditySearchResults(M.draining.itemID))
+            or (kind == "item" and C_AuctionHouse.HasFullItemSearchResults(M.draining.key)) then
+            M.draining = nil
+            M.nextSend = math.max(M.nextSend, A.Now() + 1.2)
+        end
+        return
+    end
     local active = M.active
     if not active or not M.IsVisible() then return end
-    if (event == "COMMODITY_SEARCH_RESULTS_UPDATED" or event == "COMMODITY_SEARCH_RESULTS_ADDED")
-        and arg == active.itemID then
-        M.ReadCommodity()
-    elseif (event == "ITEM_SEARCH_RESULTS_UPDATED" or event == "ITEM_SEARCH_RESULTS_ADDED")
-        and arg and arg.itemID == active.itemID then
-        M.ReadItem()
+    local kind = resultKind(event, arg, active)
+    if kind == "commodity" then M.ReadCommodity()
+    elseif kind == "item" then M.ReadItem()
     elseif event == "AUCTION_HOUSE_SHOW_ERROR" then
         fail("拍卖行查询失败，请刷新重试")
     end
 end
 
 function M.Tick()
-    if not M.IsVisible() then return end
     local now = A.Now()
+    if M.draining and now - M.draining.started > 25 then M.draining = nil end
+    if not M.IsVisible() then
+        if M.active or #M.queue > 0 or M.nextAuto then M.Pause() end
+        return
+    end
+    if M.draining then return end
     if M.active and now - M.active.started > 25 then fail("查询超时，请刷新重试") end
+    if M.auto and not M.active and #M.queue == 0 and now >= (M.nextAuto or 0) then
+        if M.RequestRefresh("sale") then M.batchAuto = true
+        else M.nextAuto = now + 30 end
+    end
     if now < M.nextSend or not C_AuctionHouse.IsThrottledMessageSystemReady() then return end
     if M.active then
         local active = M.active
@@ -149,7 +207,17 @@ function M.Tick()
         return
     end
     local id = table.remove(M.queue, 1)
-    if not id then return end
+    -- A product may have been removed while earlier items were still being queried.
+    while id and M.batchAuto do
+        local watched = false
+        for _, product in ipairs(A.profile.products) do if product.itemID == id then watched = true; break end end
+        if watched then break end
+        id = table.remove(M.queue, 1)
+    end
+    if not id then
+        if M.batchAuto then roundFinished() end
+        return
+    end
     local key = C_AuctionHouse.MakeItemKey(id)
     M.active = { itemID = id, key = key, started = now }
     local info = C_AuctionHouse.GetItemKeyInfo(key)

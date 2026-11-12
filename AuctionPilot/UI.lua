@@ -28,6 +28,37 @@ local function fitName(label, text)
     end
 end
 
+local function activityText(itemID)
+    local state = A.activity[itemID]
+    local text, help, historical = "待采样", "低价区各档挂单变化（含自己的挂单）。", false
+    if state then
+        local result = state.result
+        text = state.status or "区间无挂单"
+        if result then
+            local values = string.format("+%.0f / -%.0f / %s", result.increase, result.decrease,
+                result.rate and string.format("%.1f%%", result.rate) or "--")
+            historical = state.status ~= nil or A.Now() - result.at > A.ttl
+            text = state.status or (historical and "历史 · " or "") .. values
+            help = help .. "\n" .. (historical and "上次有效结果：" or "") .. values
+                .. "\n比较范围：单价 ≤ " .. L.Money(result.reference)
+                .. string.format("\n区间数量：%.0f → %.0f 件；采样间隔 %.1f 秒。",
+                    result.previousQuantity, result.quantity, result.at - result.from)
+                .. "\n更新于" .. A.AgeText(A.Now() - result.at)
+        elseif state.previous then
+            historical = A.Now() - state.previous.at > A.ttl
+            if historical then text = "采样已过期" end
+            help = help .. "\n最近采样：" .. A.AgeText(A.Now() - state.previous.at) .. "；等待下一次完整采样。"
+        end
+        if state.status then help = help .. "\n状态：" .. state.status end
+        if state.reference then
+            help = help .. "\n当前基准价：" .. L.Money(state.reference) .. "（最多保持 10 分钟）。"
+        end
+    end
+    if A.Market.active and A.Market.active.itemID == itemID then help = help .. "\n正在查询，暂保留上次结果。" end
+    return text, help .. "\n波动率 =（增加 + 减少）÷ 两次区间平均数量 × 100%，可超过 100%。"
+        .. "\n减少也可能来自撤单或到期；同价买卖可能抵消，不能视为实际销量。", historical
+end
+
 local function buyItem(itemID) message(A.Native.OpenBuy(itemID)) end
 
 function U.OpenProductMenu(owner, productID)
@@ -91,16 +122,17 @@ local function productRow(productID)
     row.selected:SetAllPoints(); row.selected:SetColorTexture(0.63, 0.47, 0.16, 0.24)
     row:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
     row.icon = W.Icon(row, 28); row.icon:SetPoint("LEFT", 8, 0)
-    row.name = column(row, 46, 158, 15)
-    row.alert = column(row, 208, 14, 16); row.alert:SetTextColor(unpack(W.amber))
-    row.recipe = column(row, 230, 148)
+    row.name = column(row, 46, 130, 15)
+    row.alert = column(row, 180, 14, 16); row.alert:SetTextColor(unpack(W.amber))
+    row.recipe = column(row, 202, 100)
     row.recipe:SetTextColor(unpack(W.muted))
-    row.sale = column(row, 390, 120, 15)
-    row.cost = column(row, 520, 110, 15)
-    row.profit = column(row, 642, 110, 15)
-    row.roi = column(row, 764, 92, 15)
-    row.age = column(row, 870, 90, 13)
-    for _, label in ipairs({row.sale, row.cost, row.profit, row.roi, row.age}) do label:SetJustifyH("RIGHT") end
+    row.sale = column(row, 310, 102, 14)
+    row.cost = column(row, 424, 98, 14)
+    row.profit = column(row, 534, 98, 14)
+    row.roi = column(row, 644, 92, 14)
+    row.age = column(row, 746, 84, 12)
+    row.activity = column(row, 840, 122, 11)
+    for _, label in ipairs({row.sale, row.cost, row.profit, row.roi, row.age, row.activity}) do label:SetJustifyH("RIGHT") end
     row.refresh = refreshButton(row, "刷新该产品售价及全部配方材料", function()
         message(A.Market.RequestRefresh("all", productID))
     end); row.refresh:SetPoint("LEFT", 970, 0)
@@ -146,19 +178,33 @@ function U.RefreshList()
         row.roi:SetTextColor(unpack(W.ProfitColor(estimate.roi)))
         row.age:SetText(estimate.error and "待刷新 / 缺价" or (estimate.stale and "历史 · " or "") .. A.AgeText(estimate.age))
         row.age:SetTextColor(unpack((estimate.error or estimate.stale) and W.amber or W.muted))
+        local movement, movementHelp, historical = activityText(product.itemID)
+        row.activity:SetText(movement)
+        row.activity:SetTextColor(unpack(historical and W.amber or W.muted))
+        if row.activity:GetUnboundedStringWidth() > row.activity:GetWidth() then
+            row.activity:SetText(historical and "历史 · 悬停查看" or "悬停查看")
+        end
+        for _, label in ipairs({row.sale, row.cost, row.profit, row.roi, row.age}) do
+            if label:GetUnboundedStringWidth() > label:GetWidth() then label:SetText("悬停查看") end
+        end
         if estimate.stale then row.profit:SetTextColor(unpack(W.muted)); row.roi:SetTextColor(unpack(W.muted)) end
         local quote = A.quotes[product.itemID]
         local alert = A.alerts[product.itemID]
         local alertText = alert and L.Fresh(quote, A.Now(), A.ttl) and A.AlertText(alert)
         row.alert:SetText(alertText and "!" or "")
         row.help = name .. " · " .. (recipe and recipe.name or "未选配方") .. "\n" .. A.RecipeNote(recipe)
+            .. "\n售价 " .. L.Money(estimate.sale) .. " · 总成本 " .. L.Money(estimate.unitCost)
+            .. " · 净利 " .. L.Money(estimate.unitProfit)
+            .. "\n总成本利润率 " .. (estimate.roi and string.format("%.1f%%", estimate.roi) or "--")
+            .. " · 报价时间 " .. (estimate.error and "待刷新 / 缺价" or A.AgeText(estimate.age))
             .. "\n" .. (estimate.error or (estimate.stale and "历史测算。" or "")
                 .. "总成本含材料、额外费用和手续费；总成本利润率 = 净利润 ÷ 总成本。"
                 .. "\n材料 " .. L.Money(estimate.materialCost / estimate.output)
                 .. " · 额外费用 " .. L.Money(recipe.extra / recipe.output)
                 .. " · 手续费 " .. L.Money(estimate.fee / estimate.output) .. " / 件"
                 .. "\n时间为所用报价中最早的一项。")
-            .. (alertText and "\n" .. alertText or "") .. "\n单击查看材料；右侧箭头切换或管理配方。"
+            .. (alertText and "\n" .. alertText or "") .. "\n\n" .. movementHelp
+            .. "\n单击查看材料；右侧箭头切换或管理配方。"
         y = y + 44
     end
     -- Do not hide live rows on the age ticker: a native menu closes when its owner hides.
@@ -308,10 +354,15 @@ function U.Refresh()
     for _, button in ipairs(U.nativeButtons) do button:SetEnabled(A.open) end
     U.refresh:SetEnabled(ready())
     U.refresh:SetText((A.Market.active or #A.Market.queue > 0) and "刷新中…" or "全部刷新")
+    U.auto:SetText(A.Market.auto and "自动刷新：开" or "自动刷新：关")
+    U.auto:SetEnabled(A.open and (A.Market.auto or ready()))
     local active = A.Market.active
-    U.status:SetText(active and ("正在查询：" .. (A.ItemInfo(active.itemID)) .. " · 余 " .. #A.Market.queue .. " 项")
+    U.status:SetText(A.open and A.Market.draining and "等待上次查询结束，再开始下一次采样"
+        or active and ("正在查询：" .. (A.ItemInfo(active.itemID)) .. " · 余 " .. #A.Market.queue .. " 项")
         or #A.Market.queue > 0 and ("等待查询 · " .. #A.Market.queue .. " 项")
-        or A.open and "手动刷新模式 · 点击按钮后更新报价与利润" or "拍卖行未打开 · 可编辑产品和配方")
+        or A.open and (A.Market.auto and ("自动刷新关注成品 · 下一轮 "
+            .. math.ceil(math.max(0, (A.Market.nextAuto or A.Now()) - A.Now())) .. " 秒后")
+            or "手动刷新模式 · 点击按钮后更新报价与利润") or "拍卖行未打开 · 可编辑产品和配方")
     U.freshness:SetText("超过 2 分钟标记为历史测算")
     if A.Editor.frame:IsShown() then
         A.Editor.item:RefreshName()
@@ -360,7 +411,7 @@ function U.Build()
     drag:SetScript("OnDragStart", function() if root:GetParent() == UIParent then root:StartMoving() end end)
     drag:SetScript("OnDragStop", function() root:StopMovingOrSizing() end)
     W.Label(header, "拍卖助手", 24, 16, 28, W.gold)
-    W.Label(header, "利润监控 · 手动刷新", 200, 26, 13, W.muted)
+    W.Label(header, "利润监控 · 挂单波动", 200, 26, 13, W.muted)
     local close = CreateFrame("Button", nil, header, "UIPanelCloseButton"); close:SetPoint("TOPRIGHT", -6, -6)
     close:SetScript("OnClick", function() if A.open then A.Native.Navigate("buy") else root:Hide() end end)
     U.nativeButtons = {}
@@ -374,20 +425,28 @@ function U.Build()
     local body = CreateFrame("Frame", nil, frame); body:SetSize(1084, 570); body:SetPoint("TOPLEFT", 18, -110)
     U.body = body
     U.main = CreateFrame("Frame", nil, body); U.main:SetAllPoints(body)
+    U.main:SetScript("OnHide", function() A.Market.Pause() end)
     local list = W.Panel(U.main, 1084, 340); list:SetPoint("TOPLEFT")
     W.Label(list, "关注的产品", 16, 14, 21, W.gold)
     local add = W.Button(list, "+ 添加产品", 112, 28, function() A.Editor.Open() end); add:SetPoint("TOPLEFT", 156, -12)
     W.Label(list, "按当前选用配方测算", 294, 21, 13, W.muted)
     U.refresh = W.Button(list, "全部刷新", 112, 28, function() message(A.Market.RequestRefresh("all")) end)
     U.refresh:SetPoint("TOPRIGHT", -16, -12)
+    U.auto = W.Button(list, "自动刷新：关", 144, 28, function() message(A.Market.SetAuto(not A.Market.auto)) end)
+    U.auto:SetPoint("TOPRIGHT", -136, -12)
+    U.auto:SetScript("OnEnter", function()
+        showHelp(U.auto, "只刷新关注成品的售价与各价位数量；每轮完成后等待 30 秒。\n材料按需手动刷新。离开列表暂停，返回重新采样；关闭拍卖行自动关闭。")
+    end)
+    U.auto:SetScript("OnLeave", function() GameTooltip:Hide() end)
     W.Label(list, "产品", 22, 58, 13, W.gold)
-    W.Label(list, "当前配方", 244, 58, 13, W.gold)
-    for _, spec in ipairs({{"售价 / 件", 404, 120}, {"总成本 / 件", 534, 110}, {"报价时间", 884, 90}}) do
+    W.Label(list, "当前配方", 216, 58, 13, W.gold)
+    for _, spec in ipairs({{"售价 / 件", 324, 102}, {"总成本 / 件", 438, 98}, {"报价时间", 760, 84},
+        {"增 / 减 / 波动", 854, 122}}) do
         local label = W.Label(list, spec[1], spec[2], 58, 13, W.gold, spec[3])
         label:SetJustifyH("RIGHT"); label:SetWordWrap(false)
     end
     U.sortButtons = {}
-    for _, spec in ipairs({{"净利 / 件", "unitProfit", 656, 110}, {"总成本利润率", "roi", 778, 92}}) do
+    for _, spec in ipairs({{"净利 / 件", "unitProfit", 548, 98}, {"总成本利润率", "roi", 658, 92}}) do
         local key = spec[2]
         local button = CreateFrame("Button", nil, list)
         button:SetSize(spec[4], 28); button:SetPoint("TOPLEFT", spec[3], -50)

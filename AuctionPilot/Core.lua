@@ -1,7 +1,8 @@
 local addonName, A = ...
 A.name = addonName
-A.version = "0.6.2"
+A.version = "0.7.0-test"
 A.quotes, A.alerts, A.noticeAt = {}, {}, {}
+A.activity = {}
 A.ttl = 120
 A.open = false
 
@@ -138,6 +139,7 @@ function A.DeleteProduct(id)
         if other.id == product.id then table.remove(A.profile.products, i); break end
     end
     A.alerts[product.itemID] = nil
+    A.activity[product.itemID] = nil
     if A.profile.selectedID == id then
         A.profile.selectedID = A.profile.products[1] and A.profile.products[1].id or nil
     end
@@ -191,6 +193,37 @@ function A.AlertText(alert)
     return "同价货量增加 " .. alert.increase .. " 件，可能被超过"
 end
 
+function A.BreakActivity(itemID, reason)
+    for id, state in pairs(A.activity) do
+        if not itemID or id == itemID then
+            state.previous, state.reference, state.referenceAt = nil, nil, nil
+            state.status = reason or "已暂停"
+        end
+    end
+end
+
+local function recordActivity(itemID, quote)
+    if not quote.complete or quote.error then A.BreakActivity(itemID, "查询失败"); return end
+    local state = A.activity[itemID] or {}
+    A.activity[itemID] = state
+    local previous, minimum = state.previous, quote.levels[1] and quote.levels[1].price
+    -- Repeated events for a single observation do not create an extra sample.
+    if previous and quote.at <= previous.at then return end
+    if not previous or not state.reference or quote.at - previous.at > A.ttl then
+        state.result = nil
+        state.reference, state.referenceAt = minimum, quote.at
+        state.status = minimum and "采样中" or "无挂单"
+    else
+        state.result = A.Logic.Activity(previous, quote, state.reference)
+        state.status = nil
+        -- Finish the old range first; the new reference applies only to the next pair.
+        if quote.at - state.referenceAt >= 600 or (minimum and minimum > state.reference) then
+            state.reference, state.referenceAt = minimum, quote.at
+        end
+    end
+    state.previous = quote
+end
+
 function A.AcceptQuote(itemID, quote)
     A.History.AcceptQuote(itemID, quote)
     local previous = A.quotes[itemID]
@@ -200,6 +233,7 @@ function A.AcceptQuote(itemID, quote)
         if entry.itemID == itemID then product = entry; break end
     end
     if product then
+        recordActivity(itemID, quote)
         local alert = A.Logic.Competition(A.Logic.Fresh(previous, A.Now(), A.ttl) and previous or nil, quote)
         local last = A.alerts[itemID]
         if alert then
@@ -260,12 +294,14 @@ events:SetScript("OnEvent", function(_, event, ...)
     elseif event == "AUCTION_HOUSE_SHOW" then
         A.Initialize()
         if not A.profile then return end
-        A.open, A.quotes, A.alerts, A.noticeAt = true, {}, {}, {}
+        A.open, A.quotes, A.alerts, A.noticeAt, A.activity = true, {}, {}, {}, {}
+        A.Market.auto = false
         A.Native.OnEvent(event)
         A.Market.Pause()
         C_Timer.After(0, function() if A.open then A.Native.Attach(); A.RefreshUI() end end)
     elseif event == "AUCTION_HOUSE_CLOSED" then
         A.open = false
+        A.Market.auto, A.activity = false, {}
         A.Native.OnEvent(event)
         A.Market.Pause()
         if A.UI and A.UI.frame then A.UI.frame:Hide() end

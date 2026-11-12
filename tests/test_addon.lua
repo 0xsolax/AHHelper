@@ -277,4 +277,95 @@ test("targeted refreshes select one recipe or one item without expanding the sco
     eq(#M.queue,0); A.open = true
 end)
 
+test("price-level activity sees offsetting increases and decreases below one reference", function()
+    local before = L.Snapshot({{price=1150,quantity=100}},100,true)
+    local after = L.Snapshot({{price=1145,quantity=30},{price=1146,quantity=10},
+        {price=1149,quantity=10},{price=1150,quantity=50},{price=1200,quantity=999}},130,true)
+    local result = assert(L.Activity(before,after,1150))
+    eq(result.increase,50); eq(result.decrease,50); eq(result.rate,100)
+    eq(result.previousQuantity,100); eq(result.quantity,100); eq(result.reference,1150)
+    eq(result.from,100); eq(result.at,130)
+end)
+
+test("activity includes own listings and reports unchanged books as zero", function()
+    local before = L.Snapshot({{price=100,quantity=100,own=100}},100,true)
+    local after = L.Snapshot({{price=100,quantity=150,own=150}},130,true)
+    eq(L.Activity(before,after,100).increase,50)
+    eq(L.Activity(before,after,100).rate,40)
+    eq(L.Activity(before,before,100).rate,0)
+end)
+
+test("empty books distinguish a full disappearance from no denominator", function()
+    local fullBook = L.Snapshot({{price=100,quantity=10}},100,true)
+    local empty = L.Snapshot({},130,true)
+    eq(L.Activity(fullBook,empty,100).rate,200)
+    eq(L.Activity(empty,fullBook,100).rate,200)
+    eq(L.Activity(empty,empty,100).rate,nil)
+    fullBook.complete = false; eq(L.Activity(fullBook,empty,100),nil)
+    fullBook.complete = true; fullBook.error = "failed"; eq(L.Activity(fullBook,empty,100),nil)
+end)
+
+test("auto refresh queries watched products only and waits from round completion", function()
+    M.Pause(); now = 2000; ready = true; full = true
+    assert(M.SetAuto(true)); eq(M.active.itemID,1); eq(table.concat(M.queue,","),"7")
+    M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1)
+    now = 2002; M.Tick(); eq(M.active.itemID,7)
+    now = 2010; M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",7)
+    local count = #sends
+    now = 2039.9; M.Tick(); eq(#sends,count)
+    now = 2040; M.Tick(); eq(#sends,count+1); eq(M.active.itemID,1)
+    assert(M.SetAuto(false)); eq(M.active,nil); eq(#M.queue,0)
+end)
+
+test("partial or missing result rows cannot become an empty complete book", function()
+    M.Pause(); now = 2100; assert(M.RequestItem(1)); M.Tick()
+    local read = C_AuctionHouse.GetCommoditySearchResultInfo
+    C_AuctionHouse.GetCommoditySearchResultInfo = function() return nil end
+    M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1)
+    eq(A.quotes[1].complete,false); assert(A.quotes[1].error)
+    C_AuctionHouse.GetCommoditySearchResultInfo = read
+end)
+
+test("manual work shares the auto queue and restarts the thirty-second wait", function()
+    M.Pause(); now = 2200; assert(M.SetAuto(true))
+    M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1)
+    now = 2202; M.Tick(); M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",7)
+    now = 2210; assert(M.RequestItem(2)); M.Tick()
+    eq(M.active.itemID,2); eq(M.RequestRefresh("sale"),nil)
+    now = 2218; M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",2)
+    now = 2247; M.Tick(); eq(M.active,nil)
+    now = 2248; M.Tick(); eq(M.active.itemID,1)
+    M.SetAuto(false)
+end)
+
+test("auto obeys throttle and skips products removed from a queued round", function()
+    M.Pause(); now = 2300; ready = false; local count = #sends
+    assert(M.SetAuto(true)); M.Tick(); eq(#sends,count); eq(#M.queue,2)
+    local removed = table.remove(A.profile.products,2)
+    ready = true; M.Tick(); eq(M.active.itemID,1)
+    M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1)
+    now = 2302; M.Tick(); eq(M.active,nil); eq(#M.queue,0); eq(#sends,count+1)
+    now = 2331; M.Tick(); eq(M.active,nil)
+    now = 2332; M.Tick(); eq(M.active.itemID,1)
+    M.SetAuto(false); table.insert(A.profile.products,removed)
+end)
+
+test("item pages must be complete and readable before publishing a replacement", function()
+    M.Pause(); now = 2400
+    local key = {itemID=20744,itemSuffix=0,battlePetSpeciesID=0}
+    local itemFull, calls = false, 0
+    C_AuctionHouse.HasFullItemSearchResults = function() return itemFull end
+    C_AuctionHouse.RequestMoreItemSearchResults = function() calls = calls+1; itemFull = true; return true end
+    C_AuctionHouse.GetNumItemSearchResults = function() return 1 end
+    C_AuctionHouse.GetItemSearchResultInfo = function() return {itemKey=key,buyoutAmount=300,quantity=45} end
+    assert(M.RequestItem(20744)); M.Tick()
+    local previous = A.quotes[20744]
+    M.OnEvent("ITEM_SEARCH_RESULTS_UPDATED",key); eq(A.quotes[20744],previous)
+    now = 2402; M.Tick(); eq(calls,1); eq(A.quotes[20744].levels[1].quantity,45)
+    now = 2410; assert(M.RequestItem(20744)); M.Tick()
+    C_AuctionHouse.GetItemSearchResultInfo = function() return nil end
+    M.OnEvent("ITEM_SEARCH_RESULTS_UPDATED",key)
+    eq(A.quotes[20744].complete,false); eq(A.quotes[20744].levels[1].quantity,45)
+end)
+
 print("TOTAL " .. passed .. " tests passed")

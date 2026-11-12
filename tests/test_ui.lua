@@ -256,7 +256,7 @@ end)
 test("global refresh covers every recipe and prevents duplicate queued work", function()
     local refreshes = 0
     for _, frame in ipairs(MOCK.frames) do
-        if frame.kind == "Button" and frame:IsVisible() and frame.text:find("刷新") then refreshes = refreshes + 1 end
+        if frame.kind == "Button" and frame:IsVisible() and frame.text == "全部刷新" then refreshes = refreshes + 1 end
     end
     eq(refreshes,1)
     A.UI.refresh:Click(); eq(table.concat(A.Market.queue,","),"1,2,3")
@@ -287,7 +287,7 @@ end)
 
 test("material and finished-product clicks open their exact native buy page without purchasing", function()
     local before = #MOCK.queries
-    A.Market.queue = {1,2}; A.Market.active = {itemID = 1}
+    A.Market.queue = {1,2}; A.Market.active = {itemID = 1, key = {itemID=1}, started = MOCK.time}
     A.UI.materialRows[1]:Click(); MOCK.flush()
     eq(AuctionHouseFrame.buyResult.itemKey.itemID,2)
     eq(AuctionHouseFrame:GetDisplayMode(),AuctionHouseFrameDisplayMode.CommoditiesBuy)
@@ -419,6 +419,174 @@ test("offline reopening restores standalone size and screen anchor", function()
     assert(A.UI.frame:GetWidth()*A.UI.frame:GetScale() <= 1024-36)
     assert(A.UI.frame:GetHeight()*A.UI.frame:GetScale() <= 768-36)
     UIParent:SetSize(1600,1000); A.UI.Layout()
+end)
+
+local function observe(at, rows, complete)
+    MOCK.time = at
+    A.AcceptQuote(1,A.Logic.Snapshot(rows,at,complete ~= false))
+    return A.activity[1]
+end
+local function stock(price, quantity) return {{price=price,quantity=quantity}} end
+
+test("manual product snapshots feed the activity column without refreshing material age", function()
+    assert(A.SaveProduct({itemID=1,recipeName="波动测试",output=1,fee=5,extra=0,
+        materials={{itemID=2,quantity=1,source="market"}}}))
+    event("AUCTION_HOUSE_SHOW"); MOCK.flush(); A.Native.ShowMonitor(); MOCK.flush()
+    eq(A.Market.auto,false); eq(A.UI.auto:GetText(),"自动刷新：关")
+    MOCK.time = 1000; A.AcceptQuote(2,A.Logic.Snapshot(stock(500,100),MOCK.time,true))
+    eq(A.activity[2],nil)
+    local state = observe(1000,stock(1150,100)); eq(state.status,"采样中"); eq(state.result,nil)
+    state = observe(1030,{{price=1145,quantity=50},{price=1150,quantity=50},{price=1200,quantity=999}})
+    eq(state.reference,1150); eq(state.result.increase,50); eq(state.result.decrease,50); eq(state.result.rate,100)
+    local row = A.UI.productRows[A.Selected().id]
+    assert(row.activity:GetText():find("100.0%%")); assert(row.help:find("采样间隔 30.0 秒",1,true))
+    assert(row.help:find("不能视为实际销量",1,true)); eq(A.quotes[2].at,1000)
+    observe(1060,stock(1145,100)); observe(1090,stock(1145,100)); observe(1121,stock(1145,100))
+    eq(A.Estimate(A.Selected()).stale,true); eq(A.quotes[2].at,1000)
+end)
+
+test("rising minimum finishes the old scope before rebasing the next comparison", function()
+    A.activity = {}; observe(2000,stock(1150,100))
+    local state = observe(2030,stock(1160,80))
+    eq(state.result.reference,1150); eq(state.result.decrease,100); eq(state.result.increase,0)
+    eq(state.result.rate,200); eq(state.reference,1160)
+    state = observe(2060,stock(1160,60))
+    eq(state.result.reference,1160); eq(state.result.decrease,20); eq(state.result.previousQuantity,80)
+end)
+
+test("ten-minute reference expiry never compares different ranges", function()
+    A.activity = {}; observe(3000,stock(1150,100))
+    for at = 3100,3600,100 do
+        observe(at,{{price=1100,quantity=60},{price=1130,quantity=40}})
+    end
+    local state = A.activity[1]
+    eq(state.result.reference,1150); eq(state.result.rate,0); eq(state.reference,1100)
+    state = observe(3630,{{price=1100,quantity=50},{price=1130,quantity=900}})
+    eq(state.result.reference,1100); eq(state.result.previousQuantity,60)
+    eq(state.result.decrease,10); eq(state.result.increase,0)
+end)
+
+test("gaps failures and repeated events cannot fabricate zero or fresh movement", function()
+    A.activity = {}; observe(4000,stock(100,100)); observe(4030,stock(100,80))
+    local state = A.activity[1]; local result = state.result
+    observe(4030,stock(100,1)); eq(state.result,result); eq(state.previous.levels[1].quantity,80)
+    observe(4151,stock(100,20)); eq(state.result,nil); eq(state.status,"采样中")
+    observe(4181,stock(100,10)); eq(state.result.decrease,10)
+    observe(4190,{},false); eq(state.status,"查询失败"); eq(state.previous,nil)
+    eq(state.result.decrease,10)
+    observe(4200,stock(100,40)); eq(state.result,nil); eq(state.status,"采样中")
+end)
+
+test("empty books and first later listings establish honest baselines", function()
+    A.activity = {}; local state = observe(5000,{})
+    eq(state.status,"无挂单"); eq(state.result,nil)
+    observe(5030,stock(100,20)); eq(state.status,"采样中"); eq(state.result,nil)
+    observe(5060,{}); eq(state.result.decrease,20); eq(state.result.rate,200)
+    observe(5090,{}); eq(state.result.rate,nil); eq(state.result.decrease,0)
+    observe(5120,stock(100,40)); eq(state.result.increase,40); eq(state.result.rate,200)
+end)
+
+local book = stock(100,40)
+local full = true
+C_AuctionHouse.HasFullCommoditySearchResults = function() return full end
+C_AuctionHouse.GetNumCommoditySearchResults = function() return #book end
+C_AuctionHouse.GetCommoditySearchResultInfo = function(_, index)
+    local row = book[index]
+    if row then return {unitPrice=row.price,quantity=row.quantity} end
+end
+C_AuctionHouse.RequestMoreCommoditySearchResults = function() return false end
+
+test("auto pauses for editor and native tabs then starts a fresh baseline on return", function()
+    local M = A.Market
+    MOCK.time = 5200; A.UI.auto:Click(); eq(M.auto,true); eq(M.active.itemID,1)
+    M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1); eq(A.activity[1].result,nil)
+    MOCK.time = 5230; M.Tick(); book = stock(100,20); M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1)
+    eq(A.activity[1].result.decrease,20)
+    A.Editor.Open(A.Selected()); eq(M.active,nil); eq(#M.queue,0); eq(M.auto,true)
+    eq(A.activity[1].previous,nil); local count = #MOCK.queries
+    MOCK.time = 5300; M.Tick(); eq(#MOCK.queries,count)
+    eq(M.RequestItem(2),nil)
+    A.Editor.Close(); M.Tick(); eq(M.active.itemID,1)
+    book = stock(100,5); M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1)
+    eq(A.activity[1].result,nil); eq(A.activity[1].status,"采样中")
+    A.Native.Navigate("buy"); eq(M.auto,true); eq(A.activity[1].previous,nil)
+    MOCK.time = 5400; M.Tick(); eq(M.active,nil)
+    A.Native.ShowMonitor(); MOCK.flush(); M.Tick(); eq(M.active.itemID,1)
+    M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1); eq(A.activity[1].result,nil)
+    eq(MOCK.postCalls,0); eq(MOCK.purchaseCalls or 0,0)
+    M.SetAuto(false)
+end)
+
+test("incomplete pages retain last movement and timeout breaks the next pair", function()
+    local M = A.Market
+    A.activity = {}; observe(6000,stock(100,100)); observe(6030,stock(100,80))
+    local result = A.activity[1].result
+    full = false; MOCK.time = 6060; assert(M.RequestItem(1)); M.Tick()
+    M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1)
+    eq(A.activity[1].result,result); eq(A.quotes[1].at,6030)
+    MOCK.time = 6086; M.Tick(); eq(M.active,nil); eq(A.activity[1].previous,nil)
+    eq(A.activity[1].result,result); eq(A.activity[1].status,"查询失败")
+    full = true; observe(6100,stock(100,2)); eq(A.activity[1].result,nil)
+end)
+
+test("turning auto off cancels its round and late events cannot update statistics", function()
+    local M = A.Market
+    MOCK.time = 6200; assert(M.SetAuto(true)); local before = A.quotes[1]
+    assert(M.SetAuto(false)); eq(M.active,nil); eq(#M.queue,0)
+    M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1); eq(A.quotes[1],before)
+    local count = #MOCK.queries
+    MOCK.time = 6300; M.Tick(); eq(#MOCK.queries,count)
+    assert(M.RequestItem(1)); M.Tick(); eq(M.active.itemID,1)
+    M.SetAuto(false); eq(M.active.itemID,1) -- Disabling the timer never cancels a manual query.
+    M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1)
+end)
+
+test("rapid resume drains the cancelled request before sending the same item again", function()
+    local M = A.Market
+    MOCK.time = 6500; assert(M.SetAuto(true)); eq(M.active.itemID,1)
+    MOCK.time = 6501; M.SetAuto(false)
+    local count = #MOCK.queries
+    MOCK.time = 6502; assert(M.SetAuto(true)); eq(#MOCK.queries,count)
+    local before = A.quotes[1]
+    book = stock(100,100); M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1)
+    eq(A.quotes[1],before); eq(M.active,nil)
+    MOCK.time = 6504; M.Tick(); eq(#MOCK.queries,count+1); eq(M.active.itemID,1)
+    book = stock(100,40); M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1)
+    eq(A.activity[1].previous.levels[1].quantity,40); eq(A.activity[1].result,nil)
+    M.SetAuto(false)
+end)
+
+test("cancelled partial queries expire without publishing or blocking the next session", function()
+    local M = A.Market
+    MOCK.time = 6600; assert(M.SetAuto(true)); full = false
+    M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1)
+    A.Native.Navigate("buy"); local before, count = A.quotes[1], #MOCK.queries
+    MOCK.time = 6605; M.OnEvent("COMMODITY_SEARCH_RESULTS_ADDED",1); M.Tick()
+    eq(A.quotes[1],before); eq(#MOCK.queries,count); assert(M.draining)
+    MOCK.time = 6626; M.Tick(); eq(M.draining,nil); eq(#MOCK.queries,count)
+    full = true; A.Native.ShowMonitor(); MOCK.flush(); M.Tick(); eq(M.active.itemID,1)
+    M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1); eq(A.activity[1].result,nil)
+    M.SetAuto(false)
+end)
+
+test("large or stale activity values stay readable with exact details in the tooltip", function()
+    A.activity = {}; observe(7000,stock(100,1000000000))
+    observe(7030,stock(99,1000000000))
+    local row = A.UI.productRows[A.Selected().id]
+    eq(row.activity:GetText(),"悬停查看"); assert(row.help:find("+1000000000 / -1000000000 / 200.0%",1,true))
+    MOCK.time = 7160; A.RefreshUI(); assert(row.activity:GetText():find("历史",1,true))
+    assert(row.help:find("上次有效结果",1,true))
+end)
+
+test("AH close clears session statistics and never persists auto mode", function()
+    local M = A.Market
+    assert(M.SetAuto(true)); event("AUCTION_HOUSE_CLOSED")
+    eq(M.auto,false); eq(M.active,nil); eq(#M.queue,0); eq(next(A.activity),nil)
+    eq(A.profile.activity,nil); eq(A.profile.auto,nil)
+    event("AUCTION_HOUSE_SHOW"); MOCK.flush(); A.Native.ShowMonitor(); MOCK.flush()
+    local count = #MOCK.queries; MOCK.time = 7300; M.Tick(); eq(#MOCK.queries,count)
+    observe(7330,stock(100,20)); eq(A.activity[1].result,nil)
+    A.DeleteProduct(A.Selected().id); eq(A.activity[1],nil)
 end)
 
 MOCK.addon = A
