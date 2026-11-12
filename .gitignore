@@ -1,0 +1,5 @@
+/.tools/
+/backups/
+/dist/
+__pycache__/
+*.pyc

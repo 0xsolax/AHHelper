@@ -1,0 +1,18 @@
+## Interface: 16001
+## Title: 拍卖助手 AuctionPilot
+## Notes: 读取配方与利润、背包历史价格、Shift 点击录入、原生拍卖行嵌入
+## Author: Solazhu
+## Version: 0.3.0
+## SavedVariables: AuctionPilotDB
+## OptionalDeps: Blizzard_AuctionHouseUI
+
+Libs\LibStub.lua
+Libs\LibAHTab.lua
+Logic.lua
+Core.lua
+History.lua
+Market.lua
+Native.lua
+Widgets.lua
+Editor.lua
+UI.lua
