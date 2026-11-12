@@ -51,8 +51,9 @@ test("readonly price quantity duration and deposit previews never submit or sear
     MOCK.flush(); eq(#MOCK.queries,0); eq(MOCK.nativeSetPostCalls,0)
 end)
 
-test("commodity prepare opens the native sell form and transfers exact values without posting",function()
+test("commodity prepare accepts the native item lock and transfers exact values without posting",function()
     A.UI.durationID = 3; A.RefreshUI(); click()
+    eq(MOCK.locked,true)
     local form = AuctionHouseFrame.CommoditiesSellFrame
     eq(form:IsVisible(),true); eq(A.UI.frame:IsShown(),false)
     eq(form:GetQuantity(),0); eq(MOCK.nativeSetPostCalls,1)
@@ -136,8 +137,8 @@ end)
 test("inventory identity availability and combat are rechecked before filling",function()
     for _, change in ipairs({
         function() MOCK.availableCount = 10 end, function() MOCK.itemGUID = "replacement" end,
-        function() MOCK.locked = true end, function() MOCK.bound = true end,
-        function() MOCK.combat = true end,
+        function() MOCK.removed = true end, function() MOCK.bagItemID = 2 end,
+        function() MOCK.bound = true end, function() MOCK.combat = true end,
     }) do
         reset(); MOCK.coldDisplay = true; click(); MOCK.flush()
         local form = assert(A.Native.pendingPost).form

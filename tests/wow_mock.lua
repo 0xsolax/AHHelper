@@ -351,6 +351,8 @@ function AuctionHouseFrame:SetPostItem(item)
     self:SetDisplayMode(isCommodity and AuctionHouseFrameDisplayMode.CommoditiesSell or AuctionHouseFrameDisplayMode.ItemSell)
     local form = isCommodity and self.CommoditiesSellFrame or self.ItemSellFrame
     form.item = item
+    -- The native item display locks the selected bag item until it is cleared.
+    MOCK.locked = true
     -- Native SetItem resets quantity, then commodities replace it with the bag stack count.
     form.QuantityInput:SetQuantity(isCommodity and (MOCK.stackCount or 120) or 1)
     form.PriceInput:SetAmount(0)

@@ -230,7 +230,8 @@ local function finishPost(pending)
     if InCombatLockdown() then A.Message("已停止带入数量，请在战斗结束后重新准备上架。"); return end
     local bag, slot = item:GetBagAndSlot()
     local stock = C_Container.GetContainerItemInfo(bag, slot)
-    if not stock or stock.isLocked or not C_AuctionHouse.IsSellItemValid(item)
+    -- SetPostItem locks this item in the native form; identity was checked above.
+    if not stock or not C_AuctionHouse.IsSellItemValid(item)
         or pending.quantity > C_AuctionHouse.GetAvailablePostCount(item) then
         A.Message("可出售库存已变化，数量未带入，请重新准备上架。"); return
     end
