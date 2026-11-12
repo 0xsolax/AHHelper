@@ -187,17 +187,28 @@ def render(path, native=False, menu=False):
 render(ROOT / "design" / "offline-docked-list.png", native=True)
 lua.execute('''
 local A = MOCK.addon
-MOCK.previewActivity, MOCK.previewQuotes, MOCK.previewTime = A.Logic.Copy(A.activity), A.Logic.Copy(A.quotes), MOCK.time
-MOCK.time = MOCK.time + 30
-A.AcceptQuote(1,A.Logic.Snapshot({{price=11950,quantity=1000000000}},MOCK.time,true))
-MOCK.time = MOCK.time + 30
-A.AcceptQuote(1,A.Logic.Snapshot({{price=11900,quantity=1000000000}},MOCK.time,true))
+MOCK.previewTime = MOCK.time
+MOCK.time = MOCK.time + 130
+A.RefreshUI()
 ''')
-render(ROOT / ".tools" / "layout-checks" / "activity-large.png", native=True)
+render(ROOT / ".tools" / "layout-checks" / "price-history-stale.png", native=True)
 lua.execute('''
 local A = MOCK.addon
-A.activity, A.quotes, MOCK.time = MOCK.previewActivity, MOCK.previewQuotes, MOCK.previewTime
+MOCK.time = MOCK.previewTime
 A.RefreshUI()
+''')
+lua.execute('''
+local A = MOCK.addon
+MOCK.previewQuotes, MOCK.previewPrice = A.Logic.Copy(A.quotes), A.UI.price:GetCopper()
+for _, quote in pairs(A.quotes) do quote.historical = true end
+A.RefreshUI()
+''')
+render(ROOT / ".tools" / "layout-checks" / "reopened-prices.png", native=True)
+lua.execute('MOCK.addon.quotes[1].refreshError="查询超时，请刷新重试"; MOCK.addon.RefreshUI()')
+render(ROOT / ".tools" / "layout-checks" / "failed-refresh-profit.png", native=True)
+lua.execute('''
+local A = MOCK.addon
+A.quotes = MOCK.previewQuotes; A.UI.price:SetCopper(MOCK.previewPrice); A.RefreshUI()
 ''')
 lua.execute('''
 MOCK.addon.SelectedRecipe().materials[2].source = "market"

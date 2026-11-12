@@ -185,13 +185,13 @@ test("automatic refresh pauses throughout native sell handoff and resumes withou
     C_AuctionHouse.GetNumCommoditySearchResults = function() return 1 end
     C_AuctionHouse.GetCommoditySearchResultInfo = function() return {unitPrice=12000,quantity=100} end
     assert(M.SetAuto(true)); M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1)
-    local count = #MOCK.queries
+    local count, nextSample = #MOCK.queries, A.profile.priceHistory.next
     MOCK.coldDisplay = true; click(); assert(A.Native.pendingPost)
-    eq(M.auto,true); eq(A.activity[1].previous,nil)
+    eq(M.auto,true); eq(A.profile.priceHistory.next,nextSample)
     MOCK.time = 103; M.Tick(); eq(#MOCK.queries,count)
     MOCK.flush(); MOCK.time = 110; M.Tick(); eq(#MOCK.queries,count)
     A.Native.ShowMonitor(); MOCK.flush(); M.Tick(); eq(M.active.itemID,1)
-    M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1); eq(A.activity[1].result,nil)
+    M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1); eq(A.profile.priceHistory.next,nextSample+1)
     M.SetAuto(false); eq(MOCK.nativeSetPostCalls,1)
 end)
 

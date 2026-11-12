@@ -28,35 +28,29 @@ local function fitName(label, text)
     end
 end
 
-local function activityText(itemID)
-    local state = A.activity[itemID]
-    local text, help, historical = "待采样", "低价区各档挂单变化（含自己的挂单）。", false
-    if state then
-        local result = state.result
-        text = state.status or "区间无挂单"
-        if result then
-            local values = string.format("+%.0f / -%.0f / %s", result.increase, result.decrease,
-                result.rate and string.format("%.1f%%", result.rate) or "--")
-            historical = state.status ~= nil or A.Now() - result.at > A.ttl
-            text = state.status or (historical and "历史 · " or "") .. values
-            help = help .. "\n" .. (historical and "上次有效结果：" or "") .. values
-                .. "\n比较范围：单价 ≤ " .. L.Money(result.reference)
-                .. string.format("\n区间数量：%.0f → %.0f 件；采样间隔 %.1f 秒。",
-                    result.previousQuantity, result.quantity, result.at - result.from)
-                .. "\n更新于" .. A.AgeText(A.Now() - result.at)
-        elseif state.previous then
-            historical = A.Now() - state.previous.at > A.ttl
-            if historical then text = "采样已过期" end
-            help = help .. "\n最近采样：" .. A.AgeText(A.Now() - state.previous.at) .. "；等待下一次完整采样。"
-        end
-        if state.status then help = help .. "\n状态：" .. state.status end
-        if state.reference then
-            help = help .. "\n当前基准价：" .. L.Money(state.reference) .. "（最多保持 10 分钟）。"
-        end
+local function priceTimeText(itemID)
+    local quote = A.quotes[itemID]
+    local current = quote and quote.complete and not quote.error and quote.seenAt
+    local records = A.profile.lastSeenPrices
+    local saved = type(records) == "table" and records[itemID]
+    local seenAt, price
+    if current then
+        seenAt, price = quote.seenAt, quote.levels[1] and quote.levels[1].price
+    elseif type(saved) == "table" and saved.priceVersion == 2 then
+        seenAt, price = saved.seenAt, saved.price
     end
-    if A.Market.active and A.Market.active.itemID == itemID then help = help .. "\n正在查询，暂保留上次结果。" end
-    return text, help .. "\n波动率 =（增加 + 减少）÷ 两次区间平均数量 × 100%，可超过 100%。"
-        .. "\n减少也可能来自撤单或到期；同价买卖可能抵消，不能视为实际销量。", historical
+    if not L.Number(seenAt, 1, 100000000000, true)
+        or (price ~= nil and not L.Number(price, 0.000000001, 1000000000000, false)) then
+        return "待采样", "尚无有效售价采样，请刷新关注产品。", true
+    end
+    local historical = not current or not A.open or quote.historical or A.Now() - quote.at > A.ttl
+    local text = (historical and "历史 " or "") .. date("%m-%d %H:%M", seenAt)
+    local help = "售价采样时间：" .. date("%Y-%m-%d %H:%M:%S", seenAt)
+        .. "\n" .. (not current and saved.source == "browse" and "搜索列表参考价：" or "采样最低单价：")
+        .. (price and L.Money(price) or "无一口价")
+        .. "\n" .. (not current and "历史参考，未用于当前利润测算。"
+            or historical and "上次完整监控报价，请刷新后确认当前价格。" or "当前监控报价。")
+    return text, help, historical
 end
 
 local function buyItem(itemID) message(A.Native.OpenBuy(itemID)) end
@@ -131,8 +125,8 @@ local function productRow(productID)
     row.profit = column(row, 534, 98, 14)
     row.roi = column(row, 644, 92, 14)
     row.age = column(row, 746, 84, 12)
-    row.activity = column(row, 840, 122, 11)
-    for _, label in ipairs({row.sale, row.cost, row.profit, row.roi, row.age, row.activity}) do label:SetJustifyH("RIGHT") end
+    row.priceTime = column(row, 840, 122, 11)
+    for _, label in ipairs({row.sale, row.cost, row.profit, row.roi, row.age, row.priceTime}) do label:SetJustifyH("RIGHT") end
     row.refresh = refreshButton(row, "刷新该产品售价及全部配方材料", function()
         message(A.Market.RequestRefresh("all", productID))
     end); row.refresh:SetPoint("LEFT", 970, 0)
@@ -176,15 +170,13 @@ function U.RefreshList()
         W.Amount(row.profit, estimate.unitProfit, true)
         row.roi:SetText(estimate.roi and string.format("%.1f%%", estimate.roi) or "--")
         row.roi:SetTextColor(unpack(W.ProfitColor(estimate.roi)))
-        row.age:SetText(estimate.error and "待刷新 / 缺价" or (estimate.stale and "历史 · " or "") .. A.AgeText(estimate.age))
+        row.age:SetText(estimate.refreshError and "刷新失败" or estimate.error and "待刷新 / 缺价"
+            or (estimate.stale and "历史 · " or "") .. A.AgeText(estimate.age))
         row.age:SetTextColor(unpack((estimate.error or estimate.stale) and W.amber or W.muted))
-        local movement, movementHelp, historical = activityText(product.itemID)
-        row.activity:SetText(movement)
-        row.activity:SetTextColor(unpack(historical and W.amber or W.muted))
-        if row.activity:GetUnboundedStringWidth() > row.activity:GetWidth() then
-            row.activity:SetText(historical and "历史 · 悬停查看" or "悬停查看")
-        end
-        for _, label in ipairs({row.sale, row.cost, row.profit, row.roi, row.age}) do
+        local priceTime, priceTimeHelp, historical = priceTimeText(product.itemID)
+        row.priceTime:SetText(priceTime)
+        row.priceTime:SetTextColor(unpack(historical and W.amber or W.muted))
+        for _, label in ipairs({row.sale, row.cost, row.profit, row.roi, row.age, row.priceTime}) do
             if label:GetUnboundedStringWidth() > label:GetWidth() then label:SetText("悬停查看") end
         end
         if estimate.stale then row.profit:SetTextColor(unpack(W.muted)); row.roi:SetTextColor(unpack(W.muted)) end
@@ -203,7 +195,8 @@ function U.RefreshList()
                 .. " · 额外费用 " .. L.Money(recipe.extra / recipe.output)
                 .. " · 手续费 " .. L.Money(estimate.fee / estimate.output) .. " / 件"
                 .. "\n时间为所用报价中最早的一项。")
-            .. (alertText and "\n" .. alertText or "") .. "\n\n" .. movementHelp
+            .. (estimate.refreshError and "\n" .. estimate.refreshError .. "；沿用上次完整报价作历史测算。" or "")
+            .. (alertText and "\n" .. alertText or "") .. "\n\n" .. priceTimeHelp
             .. "\n单击查看材料；右侧箭头切换或管理配方。"
         y = y + 44
     end
@@ -297,9 +290,11 @@ function U.RefreshDetail()
         W.Amount(row.unit, info and info.unit); W.Amount(row.cost, info and info.cost)
         local source = A.quotes[material.itemID]
         local age = source and A.Now() - source.at
+        local historical = source and (source.historical or age > A.ttl)
         fitName(row.age, material.source == "fixed" and "固定价" or vendor and "商店价"
-            or material.source == "vendor" and "商店缺价" or A.AgeText(age))
-        row.age:SetTextColor(unpack((info and info.error or age and age > A.ttl
+            or material.source == "vendor" and "商店缺价"
+            or (historical and "历史 · " or "") .. A.AgeText(age))
+        row.age:SetTextColor(unpack((info and info.error or historical
             and L.UsesMarketPrice(material, A.profile.vendorPrices)) and W.amber or W.muted))
         local level
         if source and source.complete and not source.error then
@@ -315,7 +310,7 @@ function U.RefreshDetail()
         row.marketQuantity:SetText(level and tostring(level.available) or marketText)
         W.Amount(row.tierCost, tierCost)
         for _, label in ipairs({row.marketQuantity, row.tierCost}) do
-            label:SetTextColor(unpack(age and age > A.ttl and W.amber or W.text))
+            label:SetTextColor(unpack(historical and W.amber or W.text))
             if label:GetUnboundedStringWidth() > label:GetWidth() then label:SetText("悬停查看") end
         end
         row.help = name .. "\n" .. (info and info.error or vendor and "商店整组价格按材料用量分摊，费用向上取整至铜。"
@@ -323,7 +318,8 @@ function U.RefreshDetail()
             .. "\nAH 最低可买价 × 可买量：" .. marketText .. "（排除自己的挂单）"
             .. "\n整档采购额：" .. (budgetError or L.Money(tierCost))
             .. "；按 AH 该档单价计算，不使用配方采购均价，也不包含更贵档位。"
-            .. "\n" .. (age and age > A.ttl and "历史参考 · " or "") .. A.AgeText(age)
+            .. "\n" .. (historical and "历史参考 · " or "") .. A.AgeText(age)
+            .. (source and source.refreshError and "\n" .. source.refreshError .. "；保留上次完整报价。" or "")
         if material.source == "fixed" or vendor then
             row.help = row.help .. (vendor and ("\n上次商店价 " .. L.Money(vendor.price) .. " / " .. vendor.stackCount
                 .. " 件 · " .. date("%m-%d %H:%M", vendor.seenAt))
@@ -343,6 +339,8 @@ function U.RefreshDetail()
     if U.selectedChanged then
         U.price:SetCopper(L.Fresh(quote, A.Now(), A.ttl) and estimate.sale or nil)
         U.priceEdited = false; U.quantity:SetText("1"); U.selectedChanged = false; U.message:SetText("")
+    elseif not U.priceEdited and quote and quote.historical then
+        U.price:SetCopper(nil)
     elseif not U.priceEdited and not U.price:GetCopper() and L.Fresh(quote, A.Now(), A.ttl) and estimate.sale then
         U.price:SetCopper(estimate.sale)
     end
@@ -411,7 +409,7 @@ function U.Build()
     drag:SetScript("OnDragStart", function() if root:GetParent() == UIParent then root:StartMoving() end end)
     drag:SetScript("OnDragStop", function() root:StopMovingOrSizing() end)
     W.Label(header, "拍卖助手", 24, 16, 28, W.gold)
-    W.Label(header, "利润监控 · 挂单波动", 200, 26, 13, W.muted)
+    W.Label(header, "利润监控 · 价格记录", 200, 26, 13, W.muted)
     local close = CreateFrame("Button", nil, header, "UIPanelCloseButton"); close:SetPoint("TOPRIGHT", -6, -6)
     close:SetScript("OnClick", function() if A.open then A.Native.Navigate("buy") else root:Hide() end end)
     U.nativeButtons = {}
@@ -435,13 +433,13 @@ function U.Build()
     U.auto = W.Button(list, "自动刷新：关", 144, 28, function() message(A.Market.SetAuto(not A.Market.auto)) end)
     U.auto:SetPoint("TOPRIGHT", -136, -12)
     U.auto:SetScript("OnEnter", function()
-        showHelp(U.auto, "只刷新关注成品的售价与各价位数量；每轮完成后等待 30 秒。\n材料按需手动刷新。离开列表暂停，返回重新采样；关闭拍卖行自动关闭。")
+        showHelp(U.auto, "只刷新关注成品，记录最低售价与采样时间；每轮完成后等待 30 秒。\n材料按需手动刷新。离开列表暂停，返回继续采集；关闭拍卖行自动关闭。")
     end)
     U.auto:SetScript("OnLeave", function() GameTooltip:Hide() end)
     W.Label(list, "产品", 22, 58, 13, W.gold)
     W.Label(list, "当前配方", 216, 58, 13, W.gold)
     for _, spec in ipairs({{"售价 / 件", 324, 102}, {"总成本 / 件", 438, 98}, {"报价时间", 760, 84},
-        {"增 / 减 / 波动", 854, 122}}) do
+        {"售价采样时间", 854, 122}}) do
         local label = W.Label(list, spec[1], spec[2], 58, 13, W.gold, spec[3])
         label:SetJustifyH("RIGHT"); label:SetWordWrap(false)
     end
