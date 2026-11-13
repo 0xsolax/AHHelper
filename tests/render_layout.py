@@ -250,5 +250,22 @@ MOCK.addon.quotes[2].complete = true; MOCK.addon.quotes[2].error = nil; MOCK.add
 ''')
 lua.execute('MOCK.addon.Editor.Close(); MOCK.addon.open=false; MOCK.addon.UI.frame:SetParent(UIParent); MOCK.addon.UI.Layout()')
 render(ROOT / "design" / "offline-standalone.png")
+lua.execute('''
+local A = MOCK.addon
+A.open=true; A.Native.ShowMonitor(); MOCK.flush()
+MOCK.items[1] = "需要检查显示宽度的很长的中文成品名称"
+A.UI.refresh:Click(); MOCK.ready=false; A.Market.Tick()
+MOCK.time=MOCK.time+10; A.Market.Tick(); A.RefreshUI()
+''')
+render(ROOT / ".tools" / "layout-checks" / "throttle-progress.png", native=True)
+lua.execute('MOCK.time=MOCK.time+20; MOCK.addon.Market.Tick()')
+render(ROOT / ".tools" / "layout-checks" / "throttle-stopped.png", native=True)
+lua.execute('''
+local M = MOCK.addon.Market
+MOCK.ready=true; M.RequestItem(1); M.Tick(); M.OnEvent("AUCTION_HOUSE_SHOW_ERROR",1)
+MOCK.time=MOCK.time+3; M.Tick(); MOCK.addon.RefreshUI()
+''')
+render(ROOT / ".tools" / "layout-checks" / "retry-long-name.png", native=True)
+lua.execute('MOCK.addon.Market.Pause()')
 lua.execute('MOCK.addon.DeleteProduct(1); MOCK.addon.DeleteProduct(2); MOCK.addon.open=true; MOCK.addon.Native.ShowMonitor(); MOCK.flush()')
 render(ROOT / ".tools" / "layout-checks" / "empty.png", native=True)

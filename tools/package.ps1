@@ -16,9 +16,9 @@ foreach ($entry in $toc) {
 }
 $distRoot = Join-Path $projectRoot 'dist'
 New-Item -ItemType Directory -Path $distRoot -Force | Out-Null
-$zipPath = Join-Path $distRoot 'AuctionPilot-0.8.0-test.zip'
+$zipPath = Join-Path $distRoot 'AuctionPilot-0.8.1-test.zip'
 Compress-Archive -LiteralPath $addonRoot -DestinationPath $zipPath -Force
 $hash = Get-FileHash -LiteralPath $zipPath -Algorithm SHA256
-Set-Content -LiteralPath ($zipPath + '.sha256') -Value ($hash.Hash + '  AuctionPilot-0.8.0-test.zip') -Encoding ascii
+Set-Content -LiteralPath ($zipPath + '.sha256') -Value ($hash.Hash + '  AuctionPilot-0.8.1-test.zip') -Encoding ascii
 Write-Output $zipPath
 Write-Output $hash.Hash

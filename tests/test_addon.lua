@@ -345,4 +345,122 @@ test("item pages must be complete and readable before publishing a replacement",
     assert(A.quotes[20744].refreshError); eq(L.Fresh(A.quotes[20744],now,120),false)
 end)
 
+local function recoveryFixture()
+    M.Pause(); M.draining, M.auto, M.nextSend, M.discardUntil = nil, false, 0, {}
+    now, ready, full, sends = 3000, true, true, {}
+    A.quotes = {}
+    A.profile.products = {
+        {id=1,itemID=1,recipes={{materials={}}}},
+        {id=2,itemID=2,recipes={{materials={}}}},
+        {id=3,itemID=3,recipes={{materials={}}}},
+    }
+    C_AuctionHouse.GetItemKeyInfo = function() return {isCommodity=true} end
+    C_AuctionHouse.SendSearchQuery = function(key) sends[#sends+1] = key.itemID end
+    C_AuctionHouse.GetCommoditySearchResultInfo = function(_, index) return rows[index] end
+    assert(M.RequestRefresh("sale"))
+end
+
+test("a stalled throttle ends the batch and releases the queue without fabricating quotes", function()
+    recoveryFixture(); ready = false; M.auto = true
+    M.Tick(); now = now+29; M.Tick(); eq(#sends,0); eq(#M.queue,3)
+    now = now+1; M.Tick()
+    eq(M.active,nil); eq(#M.queue,0); eq(M.auto,false)
+    eq(M.batch.completed,0); eq(M.batch.failed,0); eq(M.batch.total,3)
+    assert(M.batch.stopped:find("限流")); eq(next(A.quotes),nil)
+    now = now+120; ready = true; M.Tick(); eq(#sends,0)
+    assert(M.RequestRefresh("sale")); M.Tick(); eq(sends[1],1)
+end)
+
+test("one lost response cannot stop later products and its deferred retry is bounded", function()
+    recoveryFixture(); M.Tick(); eq(sends[1],1)
+    now = now+26; M.Tick(); eq(M.active.itemID,2)
+    M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1); eq(M.active.itemID,2); eq(A.quotes[1].complete,false)
+    M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",2)
+    now = now+2; M.Tick(); eq(M.active.itemID,3)
+    M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",3)
+    eq(M.batch.completed,2); eq(M.batch.failed,0); eq(#M.queue,1)
+    now = now+24; M.Tick(); eq(M.active.itemID,1); eq(table.concat(sends,","),"1,2,3,1")
+    now = now+26; M.Tick(); eq(M.active,nil); eq(#M.queue,0)
+    eq(M.batch.completed,2); eq(M.batch.failed,1)
+    now = now+120; M.Tick(); eq(#sends,4)
+end)
+
+test("transient send failure retries behind healthy products and counts each product once", function()
+    recoveryFixture()
+    local attempts = {}
+    C_AuctionHouse.SendSearchQuery = function(key)
+        sends[#sends+1] = key.itemID
+        attempts[key.itemID] = (attempts[key.itemID] or 0)+1
+        if key.itemID == 1 and attempts[1] == 1 then error("synthetic send failure") end
+    end
+    M.Tick(); eq(M.active,nil); assert(A.quotes[1].error)
+    now = now+2; M.Tick(); eq(M.active.itemID,2); M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",2)
+    now = now+2; M.Tick(); eq(M.active.itemID,3); M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",3)
+    now = now+2; M.Tick(); eq(M.active.itemID,1); M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1)
+    eq(table.concat(sends,","),"1,2,3,1"); eq(M.batch.completed,3); eq(M.batch.failed,0)
+    eq(A.quotes[1].error,nil); eq(#M.queue,0)
+end)
+
+test("unsupported equipment is skipped without retry while supported products complete", function()
+    recoveryFixture()
+    C_AuctionHouse.GetItemKeyInfo = function(key) return {isEquipment=key.itemID==1} end
+    M.Tick(); eq(M.active,nil)
+    now = now+2; M.Tick(); M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",2)
+    now = now+2; M.Tick(); M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",3)
+    eq(table.concat(sends,","),"2,3"); eq(M.batch.completed,2); eq(M.batch.failed,1); eq(#M.queue,0)
+end)
+
+test("a recovered throttle resumes the same queue without overlapping requests", function()
+    recoveryFixture(); ready = false; M.Tick()
+    now = now+20; ready = true; M.Tick(); eq(M.active.itemID,1)
+    now = now+20; M.Tick(); eq(#sends,1); eq(M.active.itemID,1)
+    M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1)
+    M.Tick(); eq(M.active.itemID,2); eq(M.batch.stopped,nil)
+end)
+
+test("read and page API exceptions fail only their item and never publish partial results", function()
+    for _, failure in ipairs({"read","page"}) do
+        recoveryFixture()
+        C_AuctionHouse.GetCommoditySearchResultInfo = function(id, index)
+            if id == 1 and failure == "read" then error("synthetic result read failure") end
+            return rows[index]
+        end
+        C_AuctionHouse.RequestMoreCommoditySearchResults = function() error("synthetic page failure") end
+        M.Tick()
+        if failure == "page" then full = false end
+        M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1)
+        now = now+2; M.Tick(); full = true
+        now = now+2; M.Tick(); eq(M.active.itemID,2)
+        M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",2)
+        eq(A.quotes[1].complete,false); eq(A.quotes[2].complete,true); eq(M.batch.completed,1)
+    end
+end)
+
+test("even a whole batch of missing responses finishes after exactly two attempts each", function()
+    recoveryFixture()
+    for tick = 0, 700 do now = 3000+tick*0.25; M.Tick() end
+    eq(table.concat(sends,","),"1,2,3,1,2,3"); eq(M.active,nil); eq(#M.queue,0)
+    eq(M.batch.completed,0); eq(M.batch.failed,3); eq(M.batch.total,3)
+end)
+
+test("a synchronous server error cannot schedule duplicate retries when the send also raises", function()
+    recoveryFixture()
+    C_AuctionHouse.SendSearchQuery = function(key)
+        sends[#sends+1] = key.itemID
+        M.OnEvent("AUCTION_HOUSE_SHOW_ERROR",123)
+        error("synthetic exception after server error")
+    end
+    for tick = 0, 80 do now = 3000+tick*0.25; M.Tick() end
+    eq(#sends,6); eq(M.active,nil); eq(#M.queue,0); eq(M.batch.failed,3)
+end)
+
+test("a persistent throttle after one success leaves an honest unfinished count", function()
+    recoveryFixture(); M.Tick(); M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1)
+    now = now+2; ready = false; M.Tick()
+    now = now+30; M.Tick()
+    eq(M.batch.completed,1); eq(M.batch.failed,0); eq(M.batch.total,3)
+    eq(#M.queue,0); eq(#sends,1); eq(A.quotes[1].complete,true); eq(A.quotes[2],nil)
+    ready = true
+end)
+
 print("TOTAL " .. passed .. " tests passed")

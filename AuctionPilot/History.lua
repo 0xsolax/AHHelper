@@ -147,7 +147,8 @@ function H.OnEvent(event, arg)
     if not plainKey(key) then return end
     -- The monitor publishes its complete snapshot through AcceptQuote.
     if (A.Market.active and A.Market.active.itemID == key.itemID)
-        or (A.Market.draining and A.Market.draining.itemID == key.itemID) then return end
+        or (A.Market.draining and A.Market.draining.itemID == key.itemID)
+        or (A.Market.discardUntil and (A.Market.discardUntil[key.itemID] or 0) > A.Now()) then return end
     local info = C_AuctionHouse.GetItemKeyInfo(key)
     if not info or info.isEquipment or info.isPet then return end
     local complete = commodity and C_AuctionHouse.HasFullCommoditySearchResults(key.itemID)

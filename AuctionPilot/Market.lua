@@ -1,5 +1,5 @@
 local _, A = ...
-local M = { queue = {}, active = nil, nextSend = 0, auto = false }
+local M = { queue = {}, active = nil, nextSend = 0, auto = false, discardUntil = {} }
 A.Market = M
 
 function M.IsVisible()
@@ -14,6 +14,7 @@ function M.Pause()
     if M.active then M.draining = M.active end
     M.queue, M.active = {}, nil
     M.batchAuto, M.nextAuto = false, nil
+    M.batch, M.waitSince = nil, nil
 end
 
 function M.SetAuto(enabled)
@@ -30,6 +31,7 @@ end
 local function roundFinished()
     if not M.active and #M.queue == 0 then
         M.batchAuto = false
+        M.waitSince = nil
         M.nextAuto = M.auto and A.Now() + 30 or nil
     end
 end
@@ -43,6 +45,8 @@ local function enqueue(items)
     end
     if #queue == 0 then return nil, "没有需要查询的拍卖行报价。" end
     M.queue, M.batchAuto = queue, false
+    M.batch = { total = #queue, completed = 0, failed = 0, attempts = {} }
+    M.waitSince = nil
     A.RefreshUI()
     return true
 end
@@ -82,7 +86,7 @@ function M.RequestRefresh(scope, productID, recipeID)
     return enqueue(items)
 end
 
-local function fail(message)
+local function fail(message, retryable, timedOut)
     local active = M.active
     if not active then return end
     local old = A.quotes[active.itemID]
@@ -94,7 +98,20 @@ local function fail(message)
         A.quotes[active.itemID] = { levels = old and old.levels or {}, at = old and old.at or 0,
             complete = false, error = message }
     end
+    -- Hold late results away from both retries and passive price capture. Other keys can proceed.
+    if retryable ~= false or timedOut then
+        M.discardUntil[active.itemID] = A.Now() + (timedOut and 25 or 3)
+    end
     M.active = nil
+    local batch = M.batch
+    if batch then
+        if retryable ~= false and batch.attempts[active.itemID] == 1
+            and A.Logic.TrackedItems(A.profile.products)[active.itemID] then
+            table.insert(M.queue, active.itemID)
+        else
+            batch.failed = batch.failed + 1
+        end
+    end
     roundFinished()
     A.RefreshUI()
 end
@@ -103,6 +120,7 @@ local function finish(rows)
     local id = M.active.itemID
     local quote = A.Logic.Snapshot(rows, A.Now(), true)
     M.active = nil
+    if M.batch then M.batch.completed = M.batch.completed + 1 end
     roundFinished()
     A.AcceptQuote(id, quote)
 end
@@ -157,7 +175,16 @@ local function resultKind(event, arg, active)
         and arg and arg.itemID == active.itemID then return "item" end
 end
 
+local function readResults(kind)
+    local active = M.active
+    local ok = pcall(kind == "commodity" and M.ReadCommodity or M.ReadItem)
+    if not ok and M.active == active then fail("读取行情失败，请稍后重试") end
+end
+
 function M.OnEvent(event, arg)
+    local id = (event == "COMMODITY_SEARCH_RESULTS_UPDATED" or event == "COMMODITY_SEARCH_RESULTS_ADDED") and arg
+        or (event == "ITEM_SEARCH_RESULTS_UPDATED" or event == "ITEM_SEARCH_RESULTS_ADDED") and arg and arg.itemID
+    if id and (M.discardUntil[id] or 0) > A.Now() then return end
     if M.draining then
         local kind = resultKind(event, arg, M.draining)
         if event == "AUCTION_HOUSE_SHOW_ERROR"
@@ -171,8 +198,7 @@ function M.OnEvent(event, arg)
     local active = M.active
     if not active or not M.IsVisible() then return end
     local kind = resultKind(event, arg, active)
-    if kind == "commodity" then M.ReadCommodity()
-    elseif kind == "item" then M.ReadItem()
+    if kind then readResults(kind)
     elseif event == "AUCTION_HOUSE_SHOW_ERROR" then
         fail("拍卖行查询失败，请刷新重试")
     end
@@ -180,18 +206,34 @@ end
 
 function M.Tick()
     local now = A.Now()
+    for id, untilTime in pairs(M.discardUntil) do
+        if now >= untilTime then M.discardUntil[id] = nil end
+    end
     if M.draining and now - M.draining.started > 25 then M.draining = nil end
     if not M.IsVisible() then
         if M.active or #M.queue > 0 or M.nextAuto then M.Pause() end
         return
     end
     if M.draining then return end
-    if M.active and now - M.active.started > 25 then fail("查询超时，请刷新重试") end
+    if M.active and now - M.active.started >= 25 then fail("查询超时，请刷新重试", true, true) end
     if M.auto and not M.active and #M.queue == 0 and now >= (M.nextAuto or 0) then
         if M.RequestRefresh("sale") then M.batchAuto = true
         else M.nextAuto = now + 30 end
     end
-    if now < M.nextSend or not C_AuctionHouse.IsThrottledMessageSystemReady() then return end
+    if not M.active and #M.queue == 0 then return end
+    if not C_AuctionHouse.IsThrottledMessageSystemReady() then
+        M.waitSince = M.waitSince or now
+        if now - M.waitSince >= 30 then
+            local reason = "限流等待超过30秒，本轮已停止，可重新刷新"
+            if M.active then fail(reason, false, true) end
+            M.queue, M.auto, M.batchAuto, M.nextAuto, M.waitSince = {}, false, false, nil, nil
+            if M.batch then M.batch.stopped = reason end
+            A.RefreshUI()
+        end
+        return
+    end
+    M.waitSince = nil
+    if now < M.nextSend then return end
     if M.active then
         local active = M.active
         if active.more then
@@ -202,36 +244,47 @@ function M.Tick()
                 if more == "commodity" then return C_AuctionHouse.RequestMoreCommoditySearchResults(active.itemID)
                 else return C_AuctionHouse.RequestMoreItemSearchResults(active.key) end
             end)
-            if not ok then fail("补全行情失败，请重试") end
+            if not ok and M.active == active then fail("补全行情失败，请重试") end
             if ok and hasFull and M.active == active then
-                if more == "commodity" then M.ReadCommodity() else M.ReadItem() end
+                readResults(more)
             end
         end
         return
     end
-    local id = table.remove(M.queue, 1)
-    -- A product may have been removed while earlier items were still being queried.
-    while id and M.batchAuto do
-        local watched = false
-        for _, product in ipairs(A.profile.products) do if product.itemID == id then watched = true; break end end
-        if watched then break end
-        id = table.remove(M.queue, 1)
+    local id, index = nil, 1
+    while index <= #M.queue do
+        local candidate, watched = M.queue[index], not M.batchAuto
+        if M.batchAuto then
+            for _, product in ipairs(A.profile.products) do if product.itemID == candidate then watched = true; break end end
+        end
+        if not watched then
+            table.remove(M.queue, index)
+            if M.batch then M.batch.total = M.batch.total - 1 end
+        elseif not M.discardUntil[candidate] then
+            id = table.remove(M.queue, index); break
+        else
+            index = index + 1
+        end
     end
     if not id then
         if M.batchAuto then roundFinished() end
         return
     end
-    local key = C_AuctionHouse.MakeItemKey(id)
-    M.active = { itemID = id, key = key, started = now }
-    local info = C_AuctionHouse.GetItemKeyInfo(key)
-    if info and (info.isEquipment or info.isPet) then
-        fail("装备或宠物请使用原生拍卖界面")
-        return
-    end
+    local active = { itemID = id, started = now }
+    M.active = active
+    if M.batch then M.batch.attempts[id] = (M.batch.attempts[id] or 0) + 1 end
     M.nextSend = now + 1.2
-    local ok = pcall(C_AuctionHouse.SendSearchQuery, key,
-        { { sortOrder = Enum.AuctionHouseSortOrder.Price, reverseSort = false } }, true)
-    if not ok then fail("查询未发送，请稍后重试") end
+    local ok = pcall(function()
+        active.key = C_AuctionHouse.MakeItemKey(id)
+        local info = C_AuctionHouse.GetItemKeyInfo(active.key)
+        if info and (info.isEquipment or info.isPet) then
+            fail("装备或宠物请使用原生拍卖界面", false)
+            return
+        end
+        C_AuctionHouse.SendSearchQuery(active.key,
+            { { sortOrder = Enum.AuctionHouseSortOrder.Price, reverseSort = false } }, true)
+    end)
+    if not ok and M.active == active then fail("查询未发送，请稍后重试") end
 end
 
 function M.StartTicker()

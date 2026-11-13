@@ -354,13 +354,31 @@ function U.Refresh()
     U.refresh:SetText((A.Market.active or #A.Market.queue > 0) and "刷新中…" or "全部刷新")
     U.auto:SetText(A.Market.auto and "自动刷新：开" or "自动刷新：关")
     U.auto:SetEnabled(A.open and (A.Market.auto or ready()))
-    local active = A.Market.active
-    U.status:SetText(A.open and A.Market.draining and "等待上次查询结束，再开始下一次采样"
-        or active and ("正在查询：" .. (A.ItemInfo(active.itemID)) .. " · 余 " .. #A.Market.queue .. " 项")
-        or #A.Market.queue > 0 and ("等待查询 · " .. #A.Market.queue .. " 项")
-        or A.open and (A.Market.auto and ("自动刷新关注成品 · 下一轮 "
-            .. math.ceil(math.max(0, (A.Market.nextAuto or A.Now()) - A.Now())) .. " 秒后")
-            or "手动刷新模式 · 点击按钮后更新报价与利润") or "拍卖行未打开 · 可编辑产品和配方")
+    local market, status = A.Market
+    local active, batch = market.active, market.batch
+    if not A.open then status = "拍卖行未打开 · 可编辑产品和配方"
+    elseif market.draining then status = "等待上次查询结束，再开始下一次采样"
+    elseif batch and batch.stopped then status = batch.stopped
+    elseif market.waitSince then status = "等待拍卖行限流恢复 · " .. math.floor(A.Now() - market.waitSince) .. "/30秒"
+    elseif active then
+        local retry = batch and batch.attempts[active.itemID] == 2
+        status = (retry and "重试1/1 · " or "") .. (active.more and "补全行情：" or "正在查询：") .. A.ItemInfo(active.itemID)
+    elseif #market.queue > 0 then
+        local nextAt
+        for _, id in ipairs(market.queue) do
+            local at = math.max(market.nextSend, market.discardUntil[id] or 0)
+            nextAt = nextAt and math.min(nextAt, at) or at
+        end
+        status = "等待发送或失败项重试 · " .. math.ceil(math.max(0, nextAt - A.Now())) .. "秒"
+    elseif market.auto then status = "自动刷新关注成品 · 下一轮 "
+        .. math.ceil(math.max(0, (market.nextAuto or A.Now()) - A.Now())) .. " 秒后"
+    elseif batch then status = "本轮结束"
+    else status = "手动刷新模式 · 点击按钮后更新报价与利润" end
+    if A.open and batch then
+        status = "完成 " .. batch.completed .. " · 失败 " .. batch.failed .. " · 待查 "
+            .. (batch.total - batch.completed - batch.failed) .. " · " .. status
+    end
+    fitName(U.status, status)
     U.freshness:SetText("超过 2 分钟标记为历史测算")
     if A.Editor.frame:IsShown() then
         A.Editor.item:RefreshName()

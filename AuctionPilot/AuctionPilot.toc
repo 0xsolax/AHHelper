@@ -2,7 +2,7 @@
 ## Title: 拍卖助手 AuctionPilot
 ## Notes: 关注成品价格历史、搜索最近价、会话利润保留、原生上架准备
 ## Author: Solazhu
-## Version: 0.8.0-test
+## Version: 0.8.1-test
 ## SavedVariables: AuctionPilotDB
 ## OptionalDeps: Blizzard_AuctionHouseUI
 

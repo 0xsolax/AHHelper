@@ -497,6 +497,7 @@ test("incomplete pages and timeout retain the last recorded price and timestamp"
     MOCK.time = 6086; M.Tick(); eq(M.active,nil)
     eq(history.next,before); eq(A.profile.lastSeenPrices[1],saved)
     full = true; observe(6100,stock(100,2)); eq(history.next,before+1)
+    M.Pause() -- Cancel the deferred retry before the next independent scenario.
 end)
 
 test("turning auto off cancels its round and late events cannot update prices", function()
@@ -586,7 +587,7 @@ end)
 
 local function resetProfitFixture()
     local M = A.Market
-    M.Pause(); M.draining, M.auto, M.nextSend = nil, false, 0
+    M.Pause(); M.draining, M.auto, M.nextSend, M.discardUntil = nil, false, 0, {}
     A.profile = {products={},nextID=1}; A.quotes = {}
     AuctionPilotDB = {version=2,profiles={["TestRealm:TestCharacter"]=A.profile}}
     MOCK.time, MOCK.serverTime = 10000, 1794460000
@@ -610,7 +611,8 @@ test("a failed refresh keeps the last profit without renewing its age or making 
     eq(history.next,nextSample); eq(A.UI.usePrice:IsEnabled(),false); eq(A.UI.price:GetCopper(),nil)
     assert(A.UI.productRows[1].help:find("沿用上次完整报价",1,true))
     eq(A.UI.productRows[1].age:GetText(),"刷新失败")
-    book = stock(1400,100); assert(M.RequestItem(1)); M.Tick()
+    eq(M.RequestItem(1),nil) -- The failed attempt already has one deferred retry.
+    book = stock(1400,100); MOCK.time = MOCK.time+25; M.Tick(); eq(M.active.itemID,1)
     MOCK.serverTime = MOCK.serverTime+30; M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1)
     result = A.Estimate(A.Selected())
     assert(result.roi>before.roi); eq(result.stale,false); eq(result.refreshError,nil)
@@ -669,6 +671,51 @@ test("late success and failure cannot restore session quotes after the last refe
     assert(M.RequestItem(1)); M.Tick(); A.DeleteProduct(1)
     book = stock(1300,100); M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1)
     eq(A.quotes[1].levels[1].price,1300); eq(history.next,nextSample)
+end)
+
+test("throttle status and progress remain visible and the refresh button unlocks at the deadline", function()
+    local M, history = resetProfitFixture()
+    local before, sale, last = history.next, A.quotes[1], A.profile.lastSeenPrices[1]
+    MOCK.ready = false; A.UI.refresh:Click(); M.Tick(); A.RefreshUI()
+    eq(A.UI.refresh:IsEnabled(),false); assert(A.UI.status:GetText():find("限流"))
+    assert(A.UI.status:GetText():find("完成 0 · 失败 0 · 待查 2",1,true))
+    MOCK.time = MOCK.time+30; M.Tick()
+    eq(A.UI.refresh:IsEnabled(),true); eq(A.UI.refresh:GetText(),"全部刷新")
+    assert(A.UI.status:GetText():find("本轮已停止")); eq(M.active,nil); eq(#M.queue,0)
+    eq(A.quotes[1],sale); eq(history.next,before); eq(A.profile.lastSeenPrices[1],last)
+    eq(A.profile.batch,nil); eq(A.profile.discardUntil,nil)
+    MOCK.ready = true; A.UI.refresh:Click(); M.Tick(); eq(M.active.itemID,1)
+end)
+
+test("late failed responses cannot leak into passive prices while later items complete", function()
+    local M, history = resetProfitFixture()
+    local before, sale, last = history.next, A.quotes[1], A.profile.lastSeenPrices[1]
+    A.UI.refresh:Click(); M.Tick(); MOCK.time = MOCK.time+26; M.Tick()
+    eq(M.active.itemID,2)
+    book = stock(9999,100); event("COMMODITY_SEARCH_RESULTS_UPDATED",1)
+    eq(A.quotes[1],sale); eq(A.profile.lastSeenPrices[1],last); eq(history.next,before)
+    book = stock(500,100); event("COMMODITY_SEARCH_RESULTS_UPDATED",2)
+    eq(M.batch.completed,1); eq(M.batch.failed,0); eq(A.quotes[2].levels[1].price,500)
+    A.RefreshUI(); assert(A.UI.status:GetText():find("完成 1 · 失败 0 · 待查 1",1,true))
+    assert(A.UI.status:GetText():find("重试 · 25秒",1,true)); eq(A.UI.refresh:IsEnabled(),false)
+    MOCK.time = MOCK.time+25; M.Tick(); A.RefreshUI()
+    eq(M.active.itemID,1); assert(A.UI.status:GetText():find("重试1/1",1,true))
+    book = stock(1400,100); event("COMMODITY_SEARCH_RESULTS_UPDATED",1)
+    eq(history.next,before+1); eq(A.quotes[1].levels[1].price,1400)
+    assert(A.UI.status:GetText():find("完成 2 · 失败 0 · 待查 0",1,true))
+    eq(A.UI.refresh:IsEnabled(),true)
+end)
+
+test("leaving the monitor cancels retries and still ignores the failed attempt's late result", function()
+    local M, history = resetProfitFixture()
+    local last, before = A.profile.lastSeenPrices[1], history.next
+    assert(M.RequestItem(1)); M.Tick(); MOCK.time = MOCK.time+26; M.Tick()
+    local queries = #MOCK.queries
+    A.Native.Navigate("buy"); eq(#M.queue,0); eq(M.batch,nil)
+    book = stock(9999,100); event("COMMODITY_SEARCH_RESULTS_UPDATED",1)
+    eq(A.profile.lastSeenPrices[1],last); eq(history.next,before)
+    MOCK.time = MOCK.time+60; M.Tick(); eq(#MOCK.queries,queries)
+    A.Native.ShowMonitor(); MOCK.flush(); M.Tick(); eq(#MOCK.queries,queries)
 end)
 
 MOCK.addon = A

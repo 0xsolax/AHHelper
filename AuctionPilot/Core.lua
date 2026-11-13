@@ -1,6 +1,6 @@
 local addonName, A = ...
 A.name = addonName
-A.version = "0.8.0-test"
+A.version = "0.8.1-test"
 A.quotes, A.alerts, A.noticeAt = {}, {}, {}
 A.ttl = 120
 A.open = false
