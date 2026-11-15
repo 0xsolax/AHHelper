@@ -15,7 +15,7 @@ end
 
 -- Load the real manifest; missing runtime files or dependencies must fail the test.
 local callbacks, frames, spells, books, queries = {}, {}, {}, {}, {}
-local playerClass, loggedIn = "PRIEST", false
+local playerClass, loggedIn, spellHaste = "PRIEST", false, 0
 local secret = {}
 issecretvalue = function(value) return value == secret end
 GetLocale = function() return "zhCN" end
@@ -41,6 +41,7 @@ C_SpellBook = {
     GetSpellBookItemInfo=function(slot) return books[slot] end,
 }
 GetSpellBaseCooldown = function(id) return 60000, spells[id] and spells[id].gcd end
+UnitSpellHaste = function(unit) eq(unit,"player"); return spellHaste end
 CreateFrame = function()
     local f = {events={},scripts={}}
     function f:RegisterEvent(event) self.events[event]=true end
@@ -159,6 +160,74 @@ end)
 test("English healing participles are counted exactly once",function()
     local effects=L.Effects("Causes 100 Holy damage and healing all party members for 200.","enUS")
     eq(effects.healing,200); eq(effects.damage,100); eq(effects.absorb,nil)
+end)
+test("Devouring Plague wording converts the complete damage at each rank",function()
+    for _,amount in ipairs({152,904}) do
+        local effects,reason,seconds=L.Effects("使目标患上疾病，在24秒内造成总计" .. amount ..
+            "点暗影伤害，并为施法者恢复等量的生命值。","zhCN")
+        eq(reason,nil); eq(seconds,24); eq(effects.damage,amount); eq(effects.healing,amount)
+        eq(effects.absorb,nil)
+    end
+end)
+test("periodic leech totals each tick once for both effects",function()
+    local effects=L.Effects("每3秒造成120点暗影伤害，持续24秒，并为施法者恢复等量的生命值。","zhCN")
+    eq(effects.damage,960); eq(effects.healing,960)
+end)
+test("explicit damage percentages produce proportional healing",function()
+    for _,percent in ipairs({15,50,125}) do
+        local effects=L.Effects("在24秒内造成600点暗影伤害，并为施法者恢复相当于所造成伤害" ..
+            percent .. "%的生命值。","zhCN")
+        eq(effects.damage,600); near(effects.healing,600*percent/100)
+    end
+    local effects=L.Effects("造成600点暗影伤害，将所造成伤害的50%转化为生命值。","zhCN")
+    eq(effects.damage,600); eq(effects.healing,300)
+end)
+test("English disease leech and explicit damage fractions are recognized",function()
+    local lead="Afflicts the target with a disease that causes 600 Shadow damage over 24 sec. "
+    for _,case in ipairs({
+        {"Damage caused by the Devouring Plague heals the caster.",600},
+        {"15% of damage caused by the Devouring Plague heals the caster.",90},
+        {"Heals you for 50% of damage dealt.",300},
+        {"Heals the caster for 50% of the damage dealt.",300},
+        {"Heals the caster for an equal amount.",600},
+        {"Heals you for an amount equal to the damage dealt.",600},
+    }) do
+        local effects=L.Effects(lead .. case[1],"enUS")
+        eq(effects.damage,600); eq(effects.healing,case[2])
+    end
+end)
+test("explicit mixed amounts in one clause are not mistaken for a leech relation",function()
+    local effects=L.Effects("造成100点神圣伤害同时恢复200点生命值。","zhCN")
+    eq(effects.damage,100); eq(effects.healing,200)
+    effects=L.Effects("Causes 100 Holy damage while healing the caster for 200 health.","enUS")
+    eq(effects.damage,100); eq(effects.healing,200)
+end)
+test("a total damage reference includes direct and periodic damage once",function()
+    local effects=L.Effects("造成100点暗影伤害，并在24秒内造成500点暗影伤害，" ..
+        "并为施法者恢复相当于总伤害50%的生命值。","zhCN")
+    eq(effects.damage,600); eq(effects.healing,300)
+end)
+test("leech needs a known complete damage source",function()
+    for _,text in ipairs({"为施法者恢复等量的生命值。",
+        "吸收600点伤害，并为施法者恢复等量的生命值。",
+        "每3秒造成100点暗影伤害，并为施法者恢复等量的生命值。"}) do
+        local effects,reason=L.Effects(text,"zhCN")
+        eq(effects,nil); eq(reason,"unsupported")
+    end
+end)
+test("unknown relative healing is not silently omitted",function()
+    for _,tail in ipairs({"为施法者恢复部分伤害量的生命值。","治疗施法者。",
+        "为施法者恢复相当于伤害量0%的生命值。","为施法者恢复相当于伤害量-50%的生命值。"}) do
+        local effects,reason=L.Effects("造成600点暗影伤害，并" .. tail,"zhCN")
+        eq(effects,nil); eq(reason,"unsupported")
+    end
+end)
+test("ambiguous duplicate healing cannot double a leech estimate",function()
+    for _,tail in ipairs({"恢复等量的生命值，并恢复等量的生命值。",
+        "恢复600点生命值，并恢复等量的生命值。"}) do
+        local effects,reason=L.Effects("造成600点暗影伤害，并" .. tail,"zhCN")
+        eq(effects,nil); eq(reason,"unsupported")
+    end
 end)
 test("percentage healing is not mistaken for a flat number",function()
     eq(effect("Heals the target for 20% of maximum health.","enUS"),nil)
@@ -350,10 +419,11 @@ test("very small scores do not round to a misleading zero",function()
     fixture(1006,"恢复1点生命值。",2000,1000)
     local t=hover(1006); eq(last(t),"效率：|cff66b3ff治疗 <0.01|r")
 end)
-test("a missing GCD API uses the documented 1.5 second reference",function()
+test("a missing GCD API never fabricates a 1.5 second reference",function()
     local original=GetSpellBaseCooldown; GetSpellBaseCooldown=nil
-    local t=hover(1004); eq(last(t),"效率：|cff66b3ff治疗 4.00|r")
+    local t=hover(1004)
     GetSpellBaseCooldown=original
+    eq(last(t),"效率：时间未知")
 end)
 test("a genuine zero GCD is not silently replaced by a positive default",function()
     spells[1004].gcd=0
@@ -385,6 +455,56 @@ test("a mixed spell with unknown mana shows one status rather than partial score
     local previous=spells[2001].costs; spells[2001].costs=nil
     local t,n=hover(2001); eq(t:NumLines(),n+1); eq(last(t),"效率：耗蓝未知")
     spells[2001].costs=previous
+end)
+test("leech ranks keep blue healing and red damage in one tooltip line",function()
+    fixture(3001,"在24秒内造成600点暗影伤害，并为施法者恢复等量的生命值。",0,200)
+    fixture(3002,"在24秒内造成900点暗影伤害，并为施法者恢复等量的生命值。",0,200)
+    local t,n=hover(3001,"GetAction")
+    for i=1,10 do callbacks[1](t,t.data) end
+    eq(t:NumLines(),n+1); eq(last(t),"效率：|cff66b3ff治疗 2.00|r  |cffff6666伤害 2.00|r")
+    t,n=hover(3002); eq(t:NumLines(),n+1)
+    eq(last(t),"效率：|cff66b3ff治疗 3.00|r  |cffff6666伤害 3.00|r")
+end)
+test("proportional leech shares one mana cost and occupied time",function()
+    fixture(3003,"在24秒内造成600点暗影伤害，并为施法者恢复相当于伤害量50%的生命值。",0,100)
+    local t,n=hover(3003); eq(t:NumLines(),n+1)
+    eq(last(t),"效率：|cff66b3ff治疗 2.00|r  |cffff6666伤害 4.00|r")
+    spellHaste=25; t=hover(3003); spellHaste=0
+    eq(last(t),"效率：|cff66b3ff治疗 2.50|r  |cffff6666伤害 5.00|r")
+    t=hover(1001); eq(last(t),"效率：|cff66b3ff治疗 1.00|r")
+end)
+test("a 1.3 second cast uses the hasted GCD without adjusting cast time twice",function()
+    fixture(3101,"恢复600点生命值。",1300,100)
+    eq(last(hover(3101)),"效率：|cff66b3ff治疗 4.00|r")
+    spellHaste=(1500/1300-1)*100
+    local t=hover(3101); spellHaste=0
+    eq(last(t),"效率：|cff66b3ff治疗 4.62|r")
+    fixture(3102,"恢复600点生命值。",2000,100)
+    spellHaste=30; t=hover(3102); spellHaste=0
+    eq(last(t),"效率：|cff66b3ff治疗 3.00|r")
+end)
+test("instant GCD follows current spell haste and the Forever limits",function()
+    for _,case in ipairs({{0,"4.00"},{25,"5.00"},{50,"6.00"},{100,"6.00"},{-20,"4.00"}}) do
+        spellHaste=case[1]; local t=hover(1004); spellHaste=0
+        eq(last(t),"效率：|cff66b3ff治疗 " .. case[2] .. "|r")
+    end
+    eq(last(hover(1004)),"效率：|cff66b3ff治疗 4.00|r")
+end)
+test("unavailable or invalid haste never invents a GCD or leaks old scores",function()
+    for _,value in ipairs({secret,false,math.huge,0/0,-100}) do
+        spellHaste=value; local t=hover(1004); spellHaste=0
+        eq(last(t),"效率：时间未知")
+    end
+    local original=UnitSpellHaste; UnitSpellHaste=nil
+    local t=hover(1004); UnitSpellHaste=original
+    eq(last(t),"效率：时间未知")
+    eq(last(hover(1004)),"效率：|cff66b3ff治疗 4.00|r")
+end)
+test("an off GCD cast does not require haste or invent a one second minimum",function()
+    fixture(3103,"恢复600点生命值。",1300,100); spells[3103].gcd=0
+    local original=UnitSpellHaste; UnitSpellHaste=nil
+    local t=hover(3103); UnitSpellHaste=original
+    eq(last(t),"效率：|cff66b3ff治疗 4.62|r")
 end)
 test("no history or saved variables accumulate over repeated hovers",function()
     for i=1,1000 do

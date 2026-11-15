@@ -44,9 +44,16 @@ local function estimate(id, data, info)
     local effects, reason, seconds = L.Effects(description, GetLocale())
     if not effects then return reasons[reason] or reasons.unsupported end
     local mana = L.ManaCost(C_Spell.GetSpellPowerCost(id))
-    -- This is the base GCD, not the remaining spell cooldown. A missing API uses a documented reference.
-    local gcdMS = 1500
+    -- Forever spell haste scales GCD within 1.0-1.5s (forever-bugs #389).
+    -- Cast time is already supplied by the client; do not apply haste to it again.
+    local gcdMS
     if type(GetSpellBaseCooldown) == "function" then local _; _, gcdMS = GetSpellBaseCooldown(id) end
+    if L.Number(gcdMS) and gcdMS > 0 then
+        local haste = type(UnitSpellHaste) == "function" and UnitSpellHaste("player")
+        if not L.Readable(haste) or type(haste) ~= "number" or not L.Number(haste + 100)
+            or haste <= -100 then return reasons.time end
+        gcdMS = math.max(math.min(gcdMS, 1000), math.min(gcdMS, 1500, gcdMS / (1 + haste / 100)))
+    end
     local parts = {}
     for _, style in ipairs(effectStyles) do
         local effect = effects[style[1]]

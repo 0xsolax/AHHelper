@@ -127,6 +127,41 @@ local function claimsOutput(clause, chinese)
         or clause:find("damage", 1, true) or clause:find("absorb", 1, true)
 end
 
+local function damageHealing(clause, chinese, values)
+    local text = clause:gsub("^%s+", ""):gsub("%s+$", ""):gsub("[%.!]$", "")
+    local percent, related
+    if chinese then
+        text = text:gsub("%s", ""):gsub("的", "")
+            :gsub("^为施法者", ""):gsub("^为自身", ""):gsub("^为你", "")
+            :gsub("所造成伤害", "伤害"):gsub("造成伤害", "伤害")
+            :gsub("总伤害", "伤害"):gsub("伤害量", "伤害"):gsub("等同于", "相当于")
+        if text == "恢复等量生命值" or text == "恢复相当于伤害生命值"
+            or text == "恢复与伤害等量生命值" then return 1, true end
+        percent = text:match("^恢复相当于伤害" .. number .. "%%生命值$")
+            or text:match("^恢复伤害" .. number .. "%%生命值$")
+            or text:match("^将伤害" .. number .. "%%转化为生命值$")
+        related = ((text:find("恢复", 1, true) or text:find("转化", 1, true))
+            and text:find("生命", 1, true) and (text:find("伤害", 1, true)
+            or text:find("等量", 1, true) or text:find("相当于", 1, true)))
+            or text == "治疗施法者"
+    else
+        text = text:gsub("heals the caster", "heals you"):gsub("the damage dealt", "damage dealt")
+        if text:match("^damage caused by .+ heals you$")
+            or text == "heals you for an amount equal to damage dealt"
+            or text == "heals you for an equal amount" or text == "heals you for the same amount" then return 1, true end
+        percent = text:match("^" .. number .. "%% of damage caused by .+ heals you$")
+            or text:match("^heals you for " .. number .. "%% of damage dealt$")
+        related = (text:find("heal", 1, true) and (text:find("damage", 1, true)
+            or text:find("equal", 1, true) or text:find("same amount", 1, true)))
+            or text == "heals you"
+    end
+    if percent then return tonumber(percent) / 100, true end
+    if values and values.healing and not text:find("%%") and not text:find("等量", 1, true)
+        and not text:find("相当于", 1, true) and not text:find("equal", 1, true)
+        and not text:find("same amount", 1, true) then return end
+    return nil, related
+end
+
 function L.Effects(description, locale)
     if locale ~= "zhCN" and locale ~= "enUS" and locale ~= "enGB" then return nil, "locale" end
     local text, reason = normalize(description)
@@ -134,22 +169,28 @@ function L.Effects(description, locale)
     for _, word in ipairs({"复活", "resurrect"}) do
         if text:find(word, 1, true) then return nil, "not_applicable" end
     end
-    -- Reactive damage, charges, and percentages need assumptions about future events.
+    -- Reactive damage and charges need assumptions about future events.
     for _, word in ipairs({"每当", "受到攻击", "攻击者", "点击", "每消耗", "每损失", "几率", "下一次近战",
         "when hit", "when struck", "attacker", "for each", "click", "charges", "next melee", "chance"}) do
         if text:find(word, 1, true) then return nil, "unsupported" end
     end
-    local fullDuration, totals = duration(text), {}
+    local fullDuration, totals, healingRatio = duration(text), {}, nil
     -- Keep each direct/periodic component separate, so a tick interval cannot multiply a direct heal.
     local clauses = text:gsub("，", ";"):gsub("。", ";"):gsub("；", ";"):gsub("并", ";")
         :gsub(",", ";"):gsub("%s+and%s+", ";"):gsub("%.%s+", ";")
     for clause in clauses:gmatch("[^;]+") do
         local values = components(clause, locale == "zhCN")
+        local ratio, related = damageHealing(clause, locale == "zhCN", values)
+        if related then
+            if not L.Number(ratio) or ratio <= 0 or healingRatio then return nil, "unsupported" end
+            healingRatio = ratio
+            values = {}
+        end
         if not values then return nil, "unsupported" end
         local period = interval(clause)
         -- A separate interval cannot safely be assigned to one of several effects.
         if period and not next(values) then return nil, "unsupported" end
-        if claimsOutput(clause, locale == "zhCN") and (not next(values) or clause:find("%%")) then
+        if not related and claimsOutput(clause, locale == "zhCN") and (not next(values) or clause:find("%%")) then
             return nil, "unsupported"
         end
         if next(values) then
@@ -164,6 +205,12 @@ function L.Effects(description, locale)
             end
             for kind, value in pairs(values) do totals[kind] = (totals[kind] or 0) + value * multiplier end
         end
+    end
+    if healingRatio then
+        -- Derive healing once from complete damage, never once per clause or per tick again.
+        -- An additional flat heal may describe the same healing; do not count it twice.
+        if not totals.damage or totals.healing then return nil, "unsupported" end
+        totals.healing = totals.damage * healingRatio
     end
     -- Preserve every effect category; damage, healing and absorption are never added together.
     if next(totals) then
