@@ -1,7 +1,7 @@
 -- Use the native tooltip callback; do not replace protected action or spellbook handlers. Solazhu.
 local _, A = ...
 local L = A.Logic
-local label = "每蓝每秒效果："
+local label = "效率："
 local reasons = { missing="数据未就绪", not_applicable="不适用", unsupported="无法估算",
     locale="语言未支持", mana="耗蓝未知", free="当前免耗蓝", time="时间未知" }
 local sources = {GetSpellBookItem=true, GetAction=true, GetSpellByID=true}
