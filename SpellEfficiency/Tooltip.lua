@@ -46,13 +46,21 @@ local function estimate(id, data, info)
     local mana = L.ManaCost(C_Spell.GetSpellPowerCost(id))
     -- Forever spell haste scales GCD within 1.0-1.5s (forever-bugs #389).
     -- Cast time is already supplied by the client; do not apply haste to it again.
-    local gcdMS
-    if type(GetSpellBaseCooldown) == "function" then local _; _, gcdMS = GetSpellBaseCooldown(id) end
-    if L.Number(gcdMS) and gcdMS > 0 then
-        local haste = type(UnitSpellHaste) == "function" and UnitSpellHaste("player")
-        if not L.Readable(haste) or type(haste) ~= "number" or not L.Number(haste + 100)
-            or haste <= -100 then return reasons.time end
-        gcdMS = math.max(math.min(gcdMS, 1000), math.min(gcdMS, 1500, gcdMS / (1 + haste / 100)))
+    local gcdMS = 1500
+    if type(GetSpellBaseCooldown) == "function" then
+        local ok, _, base = pcall(GetSpellBaseCooldown, id)
+        if ok and L.Number(base) then gcdMS = base end
+    end
+    if gcdMS > 0 then
+        local haste
+        if type(UnitSpellHaste) == "function" then
+            local ok, value = pcall(UnitSpellHaste, "player")
+            if ok then haste = value end
+        end
+        -- Until haste is readable, keep the base GCD (or the priest 1.5s default).
+        if L.Readable(haste) and type(haste) == "number" and L.Number(haste + 100) and haste > -100 then
+            gcdMS = math.max(math.min(gcdMS, 1000), math.min(gcdMS, 1500, gcdMS / (1 + haste / 100)))
+        end
     end
     local parts = {}
     for _, style in ipairs(effectStyles) do
@@ -82,18 +90,19 @@ local function setLine(tooltip, value)
     lineIndex = tooltip:NumLines()
 end
 
-local function onTooltip(tooltip, data)
+local function onTooltip(tooltip, data, source)
     if tooltip ~= GameTooltip or tooltip:IsForbidden() then return end
     local _, class = UnitClass("player")
     if class ~= "PRIEST" then return end
-    local source = tooltip:GetProcessingTooltipInfo()
+    source = source or tooltip:GetProcessingTooltipInfo()
     if not source or not sources[source.getterName] or source.append then return end
-    if not data or not L.Number(data.id) or data.id <= 0 then return end
+    if not data or data.type ~= Enum.TooltipDataType.Spell or not L.Number(data.id) or data.id <= 0 then return end
     -- Fail one hover locally; no persistent error state or work queue can block the next spell.
     local ok, info = pcall(spellBookInfo, data.id)
     if not ok or not info then return end
     local succeeded, value = pcall(estimate, data.id, data, info)
     setLine(tooltip, succeeded and value or "暂不可用")
+    return true
 end
 
 local events = CreateFrame("Frame")
@@ -109,10 +118,16 @@ local function install()
         or not Enum or not Enum.TooltipDataType then return end
     TooltipDataProcessor.AddTooltipPostCall(Enum.TooltipDataType.Spell, onTooltip)
     GameTooltip:HookScript("OnTooltipCleared", function() lineIndex = nil end)
+    events:RegisterUnitEvent("UNIT_SPELL_HASTE", "player")
     installed = true
     events:UnregisterEvent("PLAYER_LOGIN"); events:UnregisterEvent("ADDON_LOADED")
 end
-events:SetScript("OnEvent", install)
+events:SetScript("OnEvent", function(_, event, unit)
+    if event ~= "UNIT_SPELL_HASTE" then install(); return end
+    if unit ~= "player" or not lineIndex or GameTooltip:IsForbidden() or not GameTooltip:IsShown() then return end
+    local info = GameTooltip:GetPrimaryTooltipInfo()
+    if info and onTooltip(GameTooltip, info.tooltipData, info) then GameTooltip:Show() end
+end)
 events:RegisterEvent("PLAYER_LOGIN")
 events:RegisterEvent("ADDON_LOADED")
 if IsLoggedIn() then install() end

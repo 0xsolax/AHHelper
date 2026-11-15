@@ -45,6 +45,7 @@ UnitSpellHaste = function(unit) eq(unit,"player"); return spellHaste end
 CreateFrame = function()
     local f = {events={},scripts={}}
     function f:RegisterEvent(event) self.events[event]=true end
+    function f:RegisterUnitEvent(event, unit) self.events[event]=unit end
     function f:UnregisterEvent(event) self.events[event]=nil end
     function f:SetScript(event, fn) self.scripts[event]=fn end
     frames[#frames+1]=f; return f
@@ -53,7 +54,7 @@ TooltipDataProcessor = {AddTooltipPostCall=function(kind, callback)
     eq(kind,1); callbacks[#callbacks+1]=callback
 end}
 local function newTooltip(name)
-    local t = {lines={},hooks={},name=name}
+    local t = {lines={},hooks={},name=name,shown=false}
     function t:GetName() return self.name end
     function t:IsForbidden() return self.forbidden or false end
     function t:NumLines() return #self.lines end
@@ -67,17 +68,24 @@ local function newTooltip(name)
     end
     function t:ClearLines()
         self.lines={}
+        self.info=nil; self.data=nil; self.processingInfo=nil
         if self.hooks.OnTooltipCleared then self.hooks.OnTooltipCleared(self) end
     end
     function t:GetPrimaryTooltipData() return self.data end
-    function t:GetProcessingTooltipInfo() return self.info end
-    function t:Show() end
+    function t:GetPrimaryTooltipInfo() return self.info end
+    function t:GetProcessingTooltipInfo() return self.processingInfo end
+    function t:IsShown() return self.shown end
+    function t:Show() self.shown=true end
+    function t:Hide() self.shown=false end
     return t
 end
 GameTooltip = newTooltip("GameTooltip")
-local function event(name)
+local function event(name, unit)
     for _,frame in ipairs(frames) do
-        if frame.events[name] and frame.scripts.OnEvent then frame.scripts.OnEvent(frame,name) end
+        local registered=frame.events[name]
+        if (registered==true or (unit and registered==unit)) and frame.scripts.OnEvent then
+            frame.scripts.OnEvent(frame,name,unit)
+        end
     end
 end
 local function fixture(id, text, cast, mana)
@@ -92,10 +100,12 @@ local function hover(id, getter, text, channel, target)
     t.data={type=1,id=id,lines={{type=34,leftText=text or (spells[id] and spells[id].description)}}}
     if channel then t.data.lines[#t.data.lines+1]={type=0,leftText="引导"} end
     t.info={getterName=getter or "GetSpellBookItem",tooltipData=t.data}
+    t.processingInfo=t.info
     t:AddLine("技能名称")
     for _,line in ipairs(t.data.lines) do if line.leftText then t:AddLine(line.leftText) end end
     local original=t:NumLines()
     for _,callback in ipairs(callbacks) do callback(t,t.data) end
+    t:Show()
     return t,original
 end
 local function last(t) return t.lines[#t.lines].text end
@@ -419,11 +429,23 @@ test("very small scores do not round to a misleading zero",function()
     fixture(1006,"恢复1点生命值。",2000,1000)
     local t=hover(1006); eq(last(t),"效率：|cff66b3ff治疗 <0.01|r")
 end)
-test("a missing GCD API never fabricates a 1.5 second reference",function()
+test("a missing GCD API uses the default and still applies available haste",function()
     local original=GetSpellBaseCooldown; GetSpellBaseCooldown=nil
     local t=hover(1004)
     GetSpellBaseCooldown=original
-    eq(last(t),"效率：时间未知")
+    eq(last(t),"效率：|cff66b3ff治疗 4.00|r")
+    GetSpellBaseCooldown=nil; spellHaste=25
+    t=hover(1004); spellHaste=0; GetSpellBaseCooldown=original
+    eq(last(t),"效率：|cff66b3ff治疗 5.00|r")
+end)
+
+test("unavailable or invalid base GCD uses the default",function()
+    for _,value in ipairs({secret,false,math.huge,0/0,-1}) do
+        spells[1004].gcd=value; local t=hover(1004); spells[1004].gcd=1500
+        eq(last(t),"效率：|cff66b3ff治疗 4.00|r")
+    end
+    spells[1004].gcd=nil; local t=hover(1004); spells[1004].gcd=1500
+    eq(last(t),"效率：|cff66b3ff治疗 4.00|r")
 end)
 test("a genuine zero GCD is not silently replaced by a positive default",function()
     spells[1004].gcd=0
@@ -490,15 +512,75 @@ test("instant GCD follows current spell haste and the Forever limits",function()
     end
     eq(last(hover(1004)),"效率：|cff66b3ff治疗 4.00|r")
 end)
-test("unavailable or invalid haste never invents a GCD or leaks old scores",function()
+test("unavailable or invalid haste uses base GCD instead of stale scores",function()
     for _,value in ipairs({secret,false,math.huge,0/0,-100}) do
         spellHaste=value; local t=hover(1004); spellHaste=0
-        eq(last(t),"效率：时间未知")
+        eq(last(t),"效率：|cff66b3ff治疗 4.00|r")
     end
     local original=UnitSpellHaste; UnitSpellHaste=nil
     local t=hover(1004); UnitSpellHaste=original
-    eq(last(t),"效率：时间未知")
+    eq(last(t),"效率：|cff66b3ff治疗 4.00|r")
+    spellHaste=nil; t=hover(1004); spellHaste=0
+    eq(last(t),"效率：|cff66b3ff治疗 4.00|r")
     eq(last(hover(1004)),"效率：|cff66b3ff治疗 4.00|r")
+end)
+
+test("missing haste preserves a known shorter base GCD",function()
+    spells[1004].gcd=1000; spellHaste=nil
+    local t=hover(1004); spells[1004].gcd=1500; spellHaste=0
+    eq(last(t),"效率：|cff66b3ff治疗 6.00|r")
+end)
+
+test("timing API errors use the default without breaking the next hover",function()
+    local originalBase,originalHaste=GetSpellBaseCooldown,UnitSpellHaste
+    GetSpellBaseCooldown=function() error("GCD not ready") end
+    UnitSpellHaste=function() error("haste not ready") end
+    local t=hover(1004)
+    GetSpellBaseCooldown=originalBase; UnitSpellHaste=originalHaste
+    eq(last(t),"效率：|cff66b3ff治疗 4.00|r")
+    spellHaste=25; t=hover(1004); spellHaste=0
+    eq(last(t),"效率：|cff66b3ff治疗 5.00|r")
+end)
+
+test("haste becoming available updates the open tooltip without another hover",function()
+    spellHaste=nil
+    local t,n=hover(1004,"GetAction"); spellHaste=0
+    eq(last(t),"效率：|cff66b3ff治疗 4.00|r")
+    -- Outside postprocessing, use the primary tooltip rather than a transient callback context.
+    t.processingInfo=nil
+    spellHaste=25; event("UNIT_SPELL_HASTE","player"); spellHaste=0
+    eq(last(t),"效率：|cff66b3ff治疗 5.00|r"); eq(t:NumLines(),n+1)
+    for _,value in ipairs({50,secret,0,25}) do
+        spellHaste=value; event("UNIT_SPELL_HASTE","player"); spellHaste=0
+        local expected=value==50 and "6.00" or (value==25 and "5.00" or "4.00")
+        eq(last(t),"效率：|cff66b3ff治疗 " .. expected .. "|r"); eq(t:NumLines(),n+1)
+    end
+end)
+
+test("haste events use current primary spell even after an appended tooltip",function()
+    hover(1004,"GetAction")
+    local t,n=hover(3003,"GetSpellBookItem")
+    t.processingInfo={getterName="GetSpellByID",append=true,tooltipData={type=1,id=1004}}
+    spellHaste=25; event("UNIT_SPELL_HASTE","player"); spellHaste=0
+    eq(last(t),"效率：|cff66b3ff治疗 2.50|r  |cffff6666伤害 5.00|r")
+    eq(t:NumLines(),n+1); eq(queries[#queries],3003)
+end)
+
+test("haste events do not query hidden cleared or unrelated tooltips",function()
+    local t,n=hover(1004); local count=#queries
+    spellHaste=25; event("UNIT_SPELL_HASTE","target"); spellHaste=0
+    eq(#queries,count); eq(last(t),"效率：|cff66b3ff治疗 4.00|r")
+    t:Hide(); spellHaste=25; event("UNIT_SPELL_HASTE","player"); spellHaste=0
+    eq(#queries,count); eq(t:IsShown(),false)
+    t:Show(); t.forbidden=true; event("UNIT_SPELL_HASTE","player"); t.forbidden=false
+    eq(#queries,count)
+    -- A reused item tooltip may share the numeric ID of a known spell.
+    t.data.type=0; t.info.getterName="GetBagItem"
+    event("UNIT_SPELL_HASTE","player"); eq(#queries,count); eq(t:NumLines(),n+1)
+    t:ClearLines(); t:AddLine("背包物品")
+    event("UNIT_SPELL_HASTE","player"); eq(#queries,count); eq(t:NumLines(),1)
+    t,n=hover(1004,"GetUnitAura"); count=#queries
+    event("UNIT_SPELL_HASTE","player"); eq(#queries,count); eq(t:NumLines(),n)
 end)
 test("an off GCD cast does not require haste or invent a one second minimum",function()
     fixture(3103,"恢复600点生命值。",1300,100); spells[3103].gcd=0
