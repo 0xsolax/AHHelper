@@ -1,5 +1,12 @@
 -- Exercise real addon entry points against the existing UI simulator. Solazhu.
 dofile(PROJECT_ROOT .. "/tests/wow_mock.lua")
+Minimap = CreateFrame("Frame", "Minimap", UIParent)
+Minimap:SetSize(140, 140)
+Minimap:SetPoint("TOPRIGHT", UIParent, "TOPRIGHT", -20, -20)
+local frameType = getmetatable(Minimap)
+function frameType:GetFrameLevel() return self.frameLevel or 1 end
+function frameType:SetFrameLevel(level) self.frameLevel = level end
+function frameType:RegisterForClicks(...) self.clicks = {...} end
 local passed, reading, metricCalls, listCalls = 0, false, 0, 0
 local firstFrame = #MOCK.frames + 1
 local enabled, failName = true, nil
@@ -73,14 +80,31 @@ local function basicData()
     }
 end
 
-test("load registers command without constructing UI or reading metrics", function()
-    eq(#MOCK.frames + 1, firstFrame); eq(metricCalls, 0); eq(listCalls, 0)
+test("load provides a minimap entry without opening the main UI or reading metrics", function()
+    assert(A.minimapButton and A.minimapButton:IsVisible())
+    eq(A.minimapButton:GetParent(), Minimap); eq(A.UI, nil)
+    eq(metricCalls, 0); eq(listCalls, 0)
     eq(SLASH_ADDONCPU1, "/addoncpu"); assert(SlashCmdList.ADDONCPU)
 end)
-test("opening a window requires an explicit refresh before any data read", function()
-    SlashCmdList.ADDONCPU()
+test("first minimap click opens the window without collecting data", function()
+    A.minimapButton:Click()
     assert(A.UI.frame:IsShown()); eq(metricCalls, 0); eq(listCalls, 0)
     assert(A.UI.status:GetText():find("尚未刷新", 1, true))
+end)
+test("minimap and command toggle the same window without rebuilding it", function()
+    local frame, count = A.UI.frame, #MOCK.frames
+    A.minimapButton:Click(); assert(not frame:IsShown())
+    SlashCmdList.ADDONCPU(); assert(frame:IsShown())
+    eq(A.UI.frame, frame); eq(#MOCK.frames, count); eq(metricCalls, 0); eq(listCalls, 0)
+end)
+test("minimap hover only displays an owned help tooltip", function()
+    local button, before = A.minimapButton, metricCalls
+    button.scripts.OnEnter(button)
+    assert(GameTooltip:IsOwned(button)); eq(GameTooltip:GetText(), "插件耗时")
+    assert(GameTooltip:IsShown()); button.scripts.OnLeave(button)
+    assert(not GameTooltip:IsShown()); eq(metricCalls, before)
+    GameTooltip:SetOwner(UIParent); GameTooltip:Show()
+    button.scripts.OnHide(button); assert(GameTooltip:IsShown()); GameTooltip:Hide()
 end)
 test("unsupported client before the first refresh shows an error and no fake snapshot", function()
     local api = C_AddOnProfiler; C_AddOnProfiler = nil
@@ -121,6 +145,18 @@ test("time passing and reopening preserve the snapshot without a read", function
     SlashCmdList.ADDONCPU(); assert(A.UI.frame:IsShown())
     eq(metricCalls, before); eq(A.snapshot.entries[1].average, 2.25)
     eq(A.UI.rows[1].average:GetText(), "2.250")
+end)
+test("repeated minimap toggles preserve the snapshot without queries or more frames", function()
+    local before, count, snapshot = metricCalls, #MOCK.frames, A.snapshot
+    for _ = 1, 30 do A.minimapButton:Click() end
+    assert(A.UI.frame:IsShown()); eq(A.snapshot, snapshot)
+    eq(metricCalls, before); eq(#MOCK.frames, count)
+end)
+test("minimap visibility changes leave the CPU window and snapshot alone", function()
+    local before, snapshot = metricCalls, A.snapshot
+    Minimap:Hide(); assert(not A.minimapButton:IsVisible())
+    assert(A.UI.frame:IsShown()); eq(A.snapshot, snapshot)
+    Minimap:Show(); assert(A.minimapButton:IsVisible()); eq(metricCalls, before)
 end)
 test("another manual refresh replaces the snapshot", function()
     local old = A.snapshot; refresh()

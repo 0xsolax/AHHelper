@@ -102,8 +102,8 @@ local function Button(parent, text, x, y, width, callback)
     return button
 end
 
-local function HideRowTooltip(row)
-    if GameTooltip:IsOwned(row) then GameTooltip:Hide() end
+local function HideTooltip(owner)
+    if GameTooltip:IsOwned(owner) then GameTooltip:Hide() end
 end
 
 local function CreateUI()
@@ -159,8 +159,8 @@ local function CreateUI()
             GameTooltip:AddLine(self.entry.name, 0.8, 0.8, 0.8)
             GameTooltip:Show()
         end)
-        row:SetScript("OnLeave", HideRowTooltip)
-        row:SetScript("OnHide", HideRowTooltip)
+        row:SetScript("OnLeave", HideTooltip)
+        row:SetScript("OnHide", HideTooltip)
         ui.rows[i] = row
     end
     Label(frame, "平均与峰值来自游戏本次统计会话；刷新不清零，单位为毫秒。", 20, 468, 640)
@@ -171,8 +171,38 @@ local function CreateUI()
     Render()
 end
 
-SLASH_ADDONCPU1 = "/addoncpu"
-SlashCmdList.ADDONCPU = function()
+local function ToggleWindow()
     if not A.UI then CreateUI() end
     A.UI.frame:SetShown(not A.UI.frame:IsShown())
+end
+
+SLASH_ADDONCPU1 = "/addoncpu"
+SlashCmdList.ADDONCPU = ToggleWindow
+
+if Minimap then
+    local button = CreateFrame("Button", "AddonCPUMinimapButton", Minimap)
+    button:SetSize(32, 32)
+    button:SetPoint("CENTER", Minimap, "LEFT", -8, -30)
+    button:SetFrameLevel(Minimap:GetFrameLevel() + 5)
+    button:RegisterForClicks("LeftButtonUp")
+    button:SetHighlightTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
+    local icon = button:CreateTexture(nil, "BACKGROUND")
+    icon:SetSize(20, 20)
+    icon:SetPoint("CENTER", button, "CENTER", 0, 0)
+    icon:SetTexture("Interface\\Icons\\INV_Misc_PocketWatch_01")
+    local border = button:CreateTexture(nil, "OVERLAY")
+    border:SetSize(52, 52)
+    border:SetPoint("TOPLEFT", button, "TOPLEFT", 0, 0)
+    border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
+    button:SetScript("OnClick", ToggleWindow)
+    button:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+        GameTooltip:SetText("插件耗时")
+        GameTooltip:AddLine("左键：打开 / 关闭窗口", 1, 1, 1)
+        GameTooltip:AddLine("数据需在窗口内手动刷新", 0.8, 0.8, 0.8)
+        GameTooltip:Show()
+    end)
+    button:SetScript("OnLeave", HideTooltip)
+    button:SetScript("OnHide", HideTooltip)
+    A.minimapButton = button
 end
