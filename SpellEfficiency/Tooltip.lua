@@ -28,6 +28,8 @@ local function estimate(id, data, info)
     if info.isPassive then return reasons.not_applicable end
     local spell = C_Spell.GetSpellInfo(id)
     if not spell or spell.spellID ~= id then return reasons.missing end
+    local mana, costReason = L.ManaCost(C_Spell.GetSpellPowerCost(id))
+    if costReason == "not_applicable" then return reasons.not_applicable end
     local descriptions, channelled, channelSeconds = {}, false, nil
     for _, line in ipairs(data.lines or {}) do
         if line.type == Enum.TooltipDataLineType.SpellDescription then
@@ -43,7 +45,6 @@ local function estimate(id, data, info)
     local description = #descriptions > 0 and table.concat(descriptions, "\n") or C_Spell.GetSpellDescription(id)
     local effects, reason, seconds = L.Effects(description, GetLocale())
     if not effects then return reasons[reason] or reasons.unsupported end
-    local mana = L.ManaCost(C_Spell.GetSpellPowerCost(id))
     -- Forever spell haste scales GCD within 1.0-1.5s (forever-bugs #389).
     -- Cast time is already supplied by the client; do not apply haste to it again.
     local gcdMS = 1500
@@ -57,7 +58,7 @@ local function estimate(id, data, info)
             local ok, value = pcall(UnitSpellHaste, "player")
             if ok then haste = value end
         end
-        -- Until haste is readable, keep the base GCD (or the priest 1.5s default).
+        -- Until haste is readable, keep the base GCD (or the caster 1.5s default).
         if L.Readable(haste) and type(haste) == "number" and L.Number(haste + 100) and haste > -100 then
             gcdMS = math.max(math.min(gcdMS, 1000), math.min(gcdMS, 1500, gcdMS / (1 + haste / 100)))
         end
@@ -95,7 +96,7 @@ local function onTooltip(tooltip, data, source)
     if not A.Settings.IsEnabled() then return end
     if tooltip ~= GameTooltip or tooltip:IsForbidden() then return end
     local _, class = UnitClass("player")
-    if class ~= "PRIEST" then return end
+    if not L.SupportsClass(class) then return end
     source = source or tooltip:GetProcessingTooltipInfo()
     if not source or not sources[source.getterName] or source.append then return end
     if not data or data.type ~= Enum.TooltipDataType.Spell or not L.Number(data.id) or data.id <= 0 then return end
@@ -125,7 +126,7 @@ local function install()
     if installed then return end
     if not IsLoggedIn() then return end
     local _, class = UnitClass("player")
-    if class ~= "PRIEST" then
+    if not L.SupportsClass(class) then
         events:UnregisterEvent("PLAYER_LOGIN"); events:UnregisterEvent("ADDON_LOADED")
         return
     end

@@ -753,18 +753,18 @@ test("dragging uses minimap scale and stops all update work on release or hide",
     button:Show(); Minimap.scale=1
     for _,frame in ipairs(frames) do eq(frame.scripts.OnUpdate,nil) end
 end)
-test("settings reload restores only the current characters three scalar values",function()
-    local function reload(saved, alreadyLoggedIn)
-        SpellEfficiencyDB=saved; loggedIn=alreadyLoggedIn or false; callbacks={}; frames={}; A={}
-        GameTooltip=newTooltip("GameTooltip"); UISpecialFrames={}
-        SpellEfficiencyMinimapButton=nil; SpellEfficiencySettingsFrame=nil
-        for line in io.lines(PROJECT_ROOT .. "/SpellEfficiency/SpellEfficiency.toc") do
-            if line:match("%.lua$") then assert(loadfile(PROJECT_ROOT .. "/SpellEfficiency/" .. line))("SpellEfficiency",A) end
-        end
-        eq(SpellEfficiencyDB,saved)
-        event("ADDON_LOADED","SpellEfficiency")
-        if not loggedIn then loggedIn=true; event("PLAYER_LOGIN") end
+local function reload(saved, alreadyLoggedIn)
+    SpellEfficiencyDB=saved; loggedIn=alreadyLoggedIn or false; callbacks={}; frames={}; A={}
+    GameTooltip=newTooltip("GameTooltip"); UISpecialFrames={}
+    SpellEfficiencyMinimapButton=nil; SpellEfficiencySettingsFrame=nil
+    for line in io.lines(PROJECT_ROOT .. "/SpellEfficiency/SpellEfficiency.toc") do
+        if line:match("%.lua$") then assert(loadfile(PROJECT_ROOT .. "/SpellEfficiency/" .. line))("SpellEfficiency",A) end
     end
+    eq(SpellEfficiencyDB,saved)
+    event("ADDON_LOADED","SpellEfficiency")
+    if not loggedIn then loggedIn=true; event("PLAYER_LOGIN") end
+end
+test("settings reload restores only the current characters three scalar values",function()
     reload({enabled=false,timeWeight=0.25,minimapAngle=90})
     eq(SpellEfficiencyDB.enabled,false); eq(SpellEfficiencyDB.timeWeight,0.25)
     near(SpellEfficiencyMinimapButton.point[5],78)
@@ -787,5 +787,144 @@ test("settings reload restores only the current characters three scalar values",
     assert(SpellEfficiencyMinimapButton)
     playerClass="MAGE"; reload(nil); eq(SpellEfficiencyMinimapButton,nil); eq(#callbacks,0)
     playerClass="PRIEST"; reload(nil)
+end)
+
+test("regrowth healing continuation contributes the complete second effect",function()
+    for _,unit in ipairs({"sec","second","seconds"}) do
+        local effects,reason=L.Effects("Heals a friendly target for 90 to 110 and another 140 over 21 " .. unit .. ".","enUS")
+        eq(reason,nil); eq(effects.healing,240); eq(effects.damage,nil)
+    end
+    for _,text in ipairs({
+        "Heals a friendly target for 100 and another 40% over 21 sec.",
+        "Heals a friendly target for 100 and another 1.4k over 21 sec.",
+        "Heals a friendly target for 100 and another 140 over 0 sec.",
+        "Causes 100 Nature damage and another 140 over 21 sec.",
+    }) do
+        local value,reason=L.Effects(text,"enUS"); eq(value,nil); eq(reason,"unsupported")
+    end
+end)
+test("rebirth descriptions are never counted as combat healing",function()
+    for _,case in ipairs({
+        {"使一个死去的目标复生，并为其恢复400点生命值。","zhCN"},
+        {"Returns a dead target to life and heals the target for 400 health.","enUS"},
+    }) do
+        local value,reason=L.Effects(case[1],case[2]); eq(value,nil); eq(reason,"not_applicable")
+    end
+    local effects=L.Effects("Causes 100 Holy damage to an undead target.","enUS")
+    eq(effects.damage,100)
+end)
+test("insect swarm hit penalties do not hide genuinely conditional damage",function()
+    local text="The target is swarmed by insects, decreasing their chance to hit by 2% and causing 180 Nature damage over 12 sec."
+    local effects,reason=L.Effects(text,"enUS"); eq(reason,nil); eq(effects.damage,180)
+    for _,case in ipairs({
+        {"使目标命中几率降低2%，有20%的几率造成100点自然伤害。","zhCN"},
+        {"Decreasing their chance to hit by 2% and a 20% chance to cause 100 Nature damage.","enUS"},
+    }) do
+        effects,reason=L.Effects(case[1],case[2]); eq(effects,nil); eq(reason,"unsupported")
+    end
+end)
+test("resource classification respects active form costs and excludes nonmana",function()
+    for _,costs in ipairs({{{type=1,cost=15}},{{type=3,cost=40}},{{type=3,cost=0}},
+        {{type=3,cost=35},{type=4,cost=5}},{{type=0,cost=0},{type=3,cost=40}},
+        {{type=0,cost=100},{type=1,cost=15}}}) do
+        local value,reason=L.ManaCost(costs); eq(value,nil); eq(reason,"not_applicable")
+    end
+    local costs={{type=0,cost=100},{type=3,cost=40,requiredAuraID=7,hasRequiredAura=false}}
+    eq(L.ManaCost(costs),100)
+    costs[2].hasRequiredAura=true
+    local value,reason=L.ManaCost(costs); eq(value,nil); eq(reason,"not_applicable")
+    for _,bad in ipairs({{}, {type=secret,cost=40}, {type="3",cost=40}}) do
+        value,reason=L.ManaCost({{type=0,cost=100},bad}); eq(value,nil); eq(reason,nil)
+    end
+end)
+test("druid login enables one minimap entry and restores character settings",function()
+    playerClass="DRUID"; reload({enabled=false,timeWeight=0.5,minimapAngle=90})
+    assert(SpellEfficiencyMinimapButton,"druid minimap entry missing"); eq(#callbacks,1)
+    SpellEfficiencyMinimapButton:Click()
+    eq(SpellEfficiencySettingsFrame.weight:GetText(),"0.5")
+    eq(SpellEfficiencySettingsFrame.enabled:GetChecked(),false)
+    near(SpellEfficiencyMinimapButton.point[5],78)
+    local t,n=hover(1004); eq(t:NumLines(),n)
+    SpellEfficiencyMinimapButton:Click("RightButton")
+    eq(last(t),"效率：|cff66b3ff治疗 4.90|r")
+    local saved=SpellEfficiencyDB; reload(saved,true)
+    eq(SpellEfficiencyDB.timeWeight,0.5); eq(SpellEfficiencyDB.enabled,true); eq(#callbacks,1)
+    event("ADDON_LOADED","UnrelatedAddon"); event("PLAYER_LOGIN"); eq(#callbacks,1)
+    for _,frame in ipairs(frames) do eq(frame.scripts.OnUpdate,nil) end
+    assert(A.Settings.Apply(true,0.8))
+end)
+-- Druid-shaped descriptions below use synthetic amounts and IDs, not a fixed live spell database.
+test("druid healing ranks retain their own amounts costs and cast times",function()
+    fixture(4101,"恢复友方目标220到260点生命值。",2000,60)
+    fixture(4102,"恢复友方目标680到760点生命值。",3000,150)
+    spells[4101].name="治疗之触"; spells[4102].name="治疗之触"
+    eq(last(hover(4101,"GetSpellBookItem")),"效率：|cff66b3ff治疗 2.30|r")
+    eq(last(hover(4102,"GetAction")),"效率：|cff66b3ff治疗 1.99|r"); eq(queries[#queries],4102)
+    books[4102].spellID=4101; local t,n=hover(4102); books[4102].spellID=4102
+    eq(t:NumLines(),n)
+end)
+test("druid balance spells include direct periodic and control damage per target",function()
+    for _,case in ipairs({
+        {4103,"对目标造成90到110点自然伤害。",2000,50,"1.15"},
+        {4104,"对目标造成400到600点奥术伤害。",3500,100,"1.84"},
+        {4105,"对目标造成60点奥术伤害，并在12秒内造成180点额外的奥术伤害。",0,60,"2.89"},
+        {4106,"使目标命中几率降低2%，并在12秒内造成180点自然伤害。",0,60,"2.17"},
+        {4107,"将目标缠绕在原地，并在12秒内造成60点自然伤害。",0,30,"1.45"},
+    }) do
+        fixture(case[1],case[2],case[3],case[4])
+        eq(last(hover(case[1])),"效率：|cffff6666伤害 " .. case[5] .. "|r")
+    end
+end)
+test("druid healing includes complete HoTs and direct plus periodic components",function()
+    fixture(4110,"在12秒内恢复目标360点生命值。",0,90)
+    eq(last(hover(4110)),"效率：|cff66b3ff治疗 2.89|r")
+    fixture(4111,"立即恢复90到110点生命值，并在21秒内恢复140点生命值。",2000,60)
+    eq(last(hover(4111)),"效率：|cff66b3ff治疗 2.30|r")
+    local original=GetLocale; GetLocale=function() return "enUS" end
+    local t=hover(4111,"GetAction","Heals a friendly target for 90 to 110 and another 140 over 21 sec.")
+    GetLocale=original; eq(last(t),"效率：|cff66b3ff治疗 2.30|r")
+end)
+test("tranquility and hurricane count full channels without multiplying target count",function()
+    fixture(4112,"每2秒为附近5名队友恢复100点生命值，持续8秒。",0,100)
+    eq(last(hover(4112,"GetAction",nil,true)),"效率：|cff66b3ff治疗 0.76|r")
+    fixture(4113,"每秒对目标区域内的所有敌人造成30点自然伤害，持续10秒。",0,100)
+    eq(last(hover(4113,"GetAction",nil,true)),"效率：|cffff6666伤害 0.48|r")
+end)
+test("druid rage energy and combo skills are nonapplicable before effect parsing",function()
+    fixture(4120,"造成150%的武器伤害。",0,100)
+    for _,costs in ipairs({{{type=1,cost=15}},{{type=3,cost=40}},{{type=3,cost=0}},
+        {{type=3,cost=35},{type=4,cost=5}},{{type=0,cost=0},{type=3,cost=40}}}) do
+        spells[4120].costs=costs
+        eq(last(hover(4120,"GetAction")),"效率：不适用")
+    end
+end)
+test("druid form cost changes are reread without using the current power bar",function()
+    fixture(4121,"造成240点自然伤害。",0,60)
+    spells[4121].costs={{type=0,cost=60},{type=3,cost=40,requiredAuraID=7,hasRequiredAura=false}}
+    UnitPowerType=function() error("the visible power bar does not determine a spell cost") end
+    eq(last(hover(4121)),"效率：|cffff6666伤害 2.89|r")
+    spells[4121].costs[2].hasRequiredAura=true
+    eq(last(hover(4121)),"效率：不适用")
+    spells[4121].costs[2].hasRequiredAura=false
+    eq(last(hover(4121)),"效率：|cffff6666伤害 2.89|r")
+    UnitPowerType=nil
+end)
+test("druid mana readiness and free casts cannot produce stale or infinite scores",function()
+    fixture(4122,"恢复240点生命值。",2000,60)
+    spells[4122].costs=nil; eq(last(hover(4122)),"效率：耗蓝未知")
+    spells[4122].costs={}; eq(last(hover(4122)),"效率：耗蓝未知")
+    spells[4122].costs={{type=0,cost=0}}; eq(last(hover(4122)),"效率：当前免耗蓝")
+    spells[4122].costs={{type=0,cost=60}}; eq(last(hover(4122)),"效率：|cff66b3ff治疗 2.30|r")
+    local t,n=hover(4122,"GetBagItem"); eq(t:NumLines(),n)
+end)
+test("druid haste and weight changes update one line and priest support remains",function()
+    spellHaste=nil; eq(last(hover(4110)),"效率：|cff66b3ff治疗 2.89|r")
+    spellHaste=50; local n=GameTooltip:NumLines(); event("UNIT_SPELL_HASTE","player")
+    eq(last(GameTooltip),"效率：|cff66b3ff治疗 4.00|r"); eq(GameTooltip:NumLines(),n)
+    spellHaste=0; assert(A.Settings.Apply(true,0))
+    eq(last(hover(4102)),"效率：|cff66b3ff治疗 4.80|r")
+    assert(A.Settings.Apply(true,1)); eq(last(GameTooltip),"效率：|cff66b3ff治疗 1.60|r")
+    playerClass="PRIEST"; reload(nil)
+    eq(last(hover(1004)),"效率：|cff66b3ff治疗 4.34|r"); eq(#callbacks,1)
 end)
 print("TOTAL " .. passed .. " spell-efficiency tests passed")

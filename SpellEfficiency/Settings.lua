@@ -145,7 +145,7 @@ events:SetScript("OnEvent", function(_, event, name)
     end
     if not loaded or not IsLoggedIn() then return end
     local _, class = UnitClass("player")
-    if class == "PRIEST" then
+    if L.SupportsClass(class) then
         if not Minimap or not UIParent then return end
         if not button then createButton() end
     end

@@ -4,6 +4,10 @@ local L = {}
 A.Logic = L
 local number = "(%d+%.?%d*)"
 
+function L.SupportsClass(class)
+    return class == "PRIEST" or class == "DRUID"
+end
+
 function L.Readable(value)
     return not issecretvalue or not issecretvalue(value)
 end
@@ -166,20 +170,31 @@ function L.Effects(description, locale)
     if locale ~= "zhCN" and locale ~= "enUS" and locale ~= "enGB" then return nil, "locale" end
     local text, reason = normalize(description)
     if not text then return nil, reason end
-    for _, word in ipairs({"复活", "resurrect"}) do
+    for _, word in ipairs({"复活", "复生", "resurrect"}) do
         if text:find(word, 1, true) then return nil, "not_applicable" end
     end
+    if text:find("%f[%a]dead%s+target%f[%A]") then return nil, "not_applicable" end
+    -- A fixed hit-chance penalty is not a probabilistic damage proc (Insect Swarm).
+    local procText = text:gsub("命中几率降低", "命中率降低")
+        :gsub("decreasing their chance to hit", "decreasing their hit rate")
     -- Reactive damage and charges need assumptions about future events.
     for _, word in ipairs({"每当", "受到攻击", "攻击者", "点击", "每消耗", "每损失", "几率", "下一次近战",
         "when hit", "when struck", "attacker", "for each", "click", "charges", "next melee", "chance"}) do
-        if text:find(word, 1, true) then return nil, "unsupported" end
+        if procText:find(word, 1, true) then return nil, "unsupported" end
     end
-    local fullDuration, totals, healingRatio = duration(text), {}, nil
+    local fullDuration, totals, healingRatio, previousHealing = duration(text), {}, nil, false
     -- Keep each direct/periodic component separate, so a tick interval cannot multiply a direct heal.
     local clauses = text:gsub("，", ";"):gsub("。", ";"):gsub("；", ";"):gsub("并", ";")
         :gsub(",", ";"):gsub("%s+and%s+", ";"):gsub("%.%s+", ";")
     for clause in clauses:gmatch("[^;]+") do
         local values = components(clause, locale == "zhCN")
+        -- Regrowth: "heals ... and another N over X sec" omits the second healing verb.
+        if locale ~= "zhCN" and clause:match("^%s*another%f[%A]") then
+            local value, seconds, unit = clause:match("^%s*another%s+" .. number .. "%s+over%s+" .. number .. "%s+(%a+)%.?%s*$")
+            if not previousHealing or not value or tonumber(seconds) <= 0
+                or (unit ~= "sec" and unit ~= "second" and unit ~= "seconds") then return nil, "unsupported" end
+            values = {healing=tonumber(value)}
+        end
         local ratio, related = damageHealing(clause, locale == "zhCN", values)
         if related then
             if not L.Number(ratio) or ratio <= 0 or healingRatio then return nil, "unsupported" end
@@ -205,6 +220,7 @@ function L.Effects(description, locale)
             end
             for kind, value in pairs(values) do totals[kind] = (totals[kind] or 0) + value * multiplier end
         end
+        previousHealing = values.healing and not values.damage and not values.absorb
     end
     if healingRatio then
         -- Derive healing once from complete damage, never once per clause or per tick again.
@@ -228,19 +244,23 @@ end
 function L.ManaCost(costs)
     if type(costs) ~= "table" or not L.Readable(costs) then return end
     local base, aura, baseCount, auraCount = nil, nil, 0, 0
+    local nonMana = false
     for _, cost in ipairs(costs) do
-        if type(cost) ~= "table" or not L.Readable(cost.type) then return end
-        if cost.type == 0 then
-            if not L.Readable(cost.requiredAuraID) or not L.Readable(cost.hasRequiredAura) then return end
-            local required = cost.requiredAuraID and cost.requiredAuraID ~= 0
-            if not required or cost.hasRequiredAura then
+        if type(cost) ~= "table" or not L.Number(cost.type) or cost.type % 1 ~= 0 then return end
+        if not L.Readable(cost.requiredAuraID) or not L.Readable(cost.hasRequiredAura) then return end
+        local required = cost.requiredAuraID and cost.requiredAuraID ~= 0
+        if not required or cost.hasRequiredAura then
+            if cost.type == 0 then
                 if not L.Number(cost.cost) or (cost.costPerSec ~= nil
                     and (not L.Number(cost.costPerSec) or cost.costPerSec ~= 0)) then return end
                 if required then aura, auraCount = cost.cost, auraCount + 1
                 else base, baseCount = cost.cost, baseCount + 1 end
+            else
+                nonMana = true
             end
         end
     end
+    if nonMana then return nil, "not_applicable" end
     if auraCount == 1 then return aura end
     if auraCount == 0 and baseCount == 1 then return base end
 end
