@@ -297,12 +297,26 @@ test("one malformed effect component invalidates the complete estimate",function
     eq(effect("恢复100点生命值，并每3秒恢复50点生命值。","zhCN"),nil)
 end)
 test("cast time and GCD overlap rather than adding",function()
-    near(L.Score(600,100,2500,1500,false),2.4)
-    near(L.Score(600,100,500,1500,false),4)
+    near(L.Score(600,100,2500,1500,false),2.882698641555435)
+    near(L.Score(600,100,500,1500,false),4.337887084790794)
 end)
 test("instant and channel spells have nonzero occupied time",function()
-    near(L.Score(600,100,0,1500,false),4)
-    near(L.Score(600,100,0,1500,true,3),2)
+    near(L.Score(600,100,0,1500,false),4.337887084790794)
+    near(L.Score(600,100,0,1500,true,3),2.4914618792310343)
+    near(L.Score(600,100,0,1000,false),6)
+end)
+test("doubling occupied time penalizes less than doubling mana",function()
+    local base=L.Score(600,100,1500,1500,false)
+    near(L.Score(600,100,3000,1500,false)/base,0.5743491774985175)
+    near(L.Score(600,200,1500,1500,false)/base,0.5)
+    near(L.Score(1200,100,1500,1500,false)/base,2)
+end)
+test("reduced time weight can favor a slower spell with higher effect per mana",function()
+    local fast=L.Score(600,100,1500,1500,false)
+    local slow=L.Score(1100,100,3000,1500,false)
+    -- Old per-second scores were 4.00 and 3.67; a uniform scale cannot reverse that ranking.
+    assert(slow>fast,"higher per-mana yield should outweigh this casting-time difference")
+    near(fast,4.337887084790794); near(slow,4.567680111923563)
 end)
 test("missing channel time zero mana and nonfinite inputs are not scores",function()
     eq(L.Score(600,100,0,1500,true),nil)
@@ -334,36 +348,36 @@ end)
 test("spellbook low and high ranks keep separate IDs and values",function()
     fixture(1001,"恢复100点生命值。",2000,50)
     fixture(1002,"恢复600点生命值。",3000,100)
-    local t,n=hover(1001); eq(t:NumLines(),n+1); eq(last(t),"效率：|cff66b3ff治疗 1.00|r")
-    t,n=hover(1002); eq(t:NumLines(),n+1); eq(last(t),"效率：|cff66b3ff治疗 2.00|r")
+    local t,n=hover(1001); eq(t:NumLines(),n+1); eq(last(t),"效率：|cff66b3ff治疗 1.15|r")
+    t,n=hover(1002); eq(t:NumLines(),n+1); eq(last(t),"效率：|cff66b3ff治疗 2.49|r")
     eq(queries[#queries],1002)
 end)
 test("action bar uses the displayed rank even with the same spell name",function()
-    local t=hover(1001,"GetAction"); eq(last(t),"效率：|cff66b3ff治疗 1.00|r")
-    t=hover(1002,"GetAction"); eq(last(t),"效率：|cff66b3ff治疗 2.00|r")
+    local t=hover(1001,"GetAction"); eq(last(t),"效率：|cff66b3ff治疗 1.15|r")
+    t=hover(1002,"GetAction"); eq(last(t),"效率：|cff66b3ff治疗 2.49|r")
 end)
 test("native description wins over an out of date description API",function()
     local t=hover(1001,"GetAction","恢复200点生命值。")
-    eq(last(t),"效率：|cff66b3ff治疗 2.00|r")
+    eq(last(t),"效率：|cff66b3ff治疗 2.30|r")
 end)
 test("repeated postprocessing updates one existing line",function()
     local t=hover(1001); local count=t:NumLines()
     for i=1,10 do callbacks[1](t,t.data) end
-    eq(t:NumLines(),count); eq(last(t),"效率：|cff66b3ff治疗 1.00|r")
+    eq(t:NumLines(),count); eq(last(t),"效率：|cff66b3ff治疗 1.15|r")
 end)
 test("native rebuild clears the old line and computes new costs",function()
     spells[1001].costs[1].cost=25
-    local t,n=hover(1001); eq(t:NumLines(),n+1); eq(last(t),"效率：|cff66b3ff治疗 2.00|r")
+    local t,n=hover(1001); eq(t:NumLines(),n+1); eq(last(t),"效率：|cff66b3ff治疗 2.30|r")
     spells[1001].costs[1].cost=50
 end)
 test("channel hover uses complete duration instead of instant cast time",function()
     fixture(1003,"在3秒内造成600点暗影伤害。",0,100)
-    local t=hover(1003,"GetAction",nil,true); eq(last(t),"效率：|cffff6666伤害 2.00|r")
+    local t=hover(1003,"GetAction",nil,true); eq(last(t),"效率：|cffff6666伤害 2.49|r")
 end)
 test("explicit channel header duration can supply the occupied time",function()
     local t=hover(1003,"GetAction","造成600点暗影伤害。",true)
     t.data.lines[2].leftText="引导（3秒）"
-    callbacks[1](t,t.data); eq(last(t),"效率：|cffff6666伤害 2.00|r")
+    callbacks[1](t,t.data); eq(last(t),"效率：|cffff6666伤害 2.49|r")
 end)
 test("missing channel duration never falls back to instant GCD",function()
     local t=hover(1003,"GetAction","造成600点暗影伤害。",true)
@@ -371,7 +385,7 @@ test("missing channel duration never falls back to instant GCD",function()
 end)
 test("instant HoT uses GCD rather than the duration of healing",function()
     fixture(1004,"在15秒内恢复600点生命值。",0,100)
-    local t=hover(1004); eq(last(t),"效率：|cff66b3ff治疗 4.00|r")
+    local t=hover(1004); eq(last(t),"效率：|cff66b3ff治疗 4.34|r")
 end)
 test("utility and passive spells get only one nonapplicable line",function()
     fixture(1005,"使目标耐力提高30点。",0,100)
@@ -387,14 +401,14 @@ end)
 test("failed query does not break the next spell or retain a stale score",function()
     spells[1001].fail=true
     local t,n=hover(1001); eq(t:NumLines(),n+1); eq(last(t),"效率：暂不可用")
-    t=hover(1002); eq(last(t),"效率：|cff66b3ff治疗 2.00|r")
+    t=hover(1002); eq(last(t),"效率：|cff66b3ff治疗 2.49|r")
     spells[1001].fail=nil
 end)
 test("unloaded data retries on the next native hover",function()
     local old=spells[1001].description; spells[1001].description=""
     local t=hover(1001); eq(last(t),"效率：数据未就绪")
     spells[1001].description=old
-    t=hover(1001); eq(last(t),"效率：|cff66b3ff治疗 1.00|r")
+    t=hover(1001); eq(last(t),"效率：|cff66b3ff治疗 1.15|r")
 end)
 test("items auras links other players and forbidden tooltips are untouched",function()
     for _,getter in ipairs({"GetBagItem","GetUnitAura","GetHyperlink"}) do
@@ -433,19 +447,19 @@ test("a missing GCD API uses the default and still applies available haste",func
     local original=GetSpellBaseCooldown; GetSpellBaseCooldown=nil
     local t=hover(1004)
     GetSpellBaseCooldown=original
-    eq(last(t),"效率：|cff66b3ff治疗 4.00|r")
+    eq(last(t),"效率：|cff66b3ff治疗 4.34|r")
     GetSpellBaseCooldown=nil; spellHaste=25
     t=hover(1004); spellHaste=0; GetSpellBaseCooldown=original
-    eq(last(t),"效率：|cff66b3ff治疗 5.00|r")
+    eq(last(t),"效率：|cff66b3ff治疗 5.19|r")
 end)
 
 test("unavailable or invalid base GCD uses the default",function()
     for _,value in ipairs({secret,false,math.huge,0/0,-1}) do
         spells[1004].gcd=value; local t=hover(1004); spells[1004].gcd=1500
-        eq(last(t),"效率：|cff66b3ff治疗 4.00|r")
+        eq(last(t),"效率：|cff66b3ff治疗 4.34|r")
     end
     spells[1004].gcd=nil; local t=hover(1004); spells[1004].gcd=1500
-    eq(last(t),"效率：|cff66b3ff治疗 4.00|r")
+    eq(last(t),"效率：|cff66b3ff治疗 4.34|r")
 end)
 test("a genuine zero GCD is not silently replaced by a positive default",function()
     spells[1004].gcd=0
@@ -456,22 +470,22 @@ test("mixed spell keeps blue healing and red damage in one line",function()
     fixture(2001,"造成300点神圣伤害，并为附近队友恢复600点生命值。",3000,100)
     local t,n=hover(2001,"GetAction")
     eq(t:NumLines(),n+1)
-    eq(last(t),"效率：|cff66b3ff治疗 2.00|r  |cffff6666伤害 1.00|r")
+    eq(last(t),"效率：|cff66b3ff治疗 2.49|r  |cffff6666伤害 1.25|r")
 end)
 test("mixed ranks and repeated callbacks update both scores without extra lines",function()
     fixture(2002,"造成400点神圣伤害，并为附近队友恢复800点生命值。",2000,400)
     local t,n=hover(2002)
     for i=1,10 do callbacks[1](t,t.data) end
     eq(t:NumLines(),n+1)
-    eq(last(t),"效率：|cff66b3ff治疗 1.00|r  |cffff6666伤害 0.50|r")
+    eq(last(t),"效率：|cff66b3ff治疗 1.15|r  |cffff6666伤害 0.57|r")
     t,n=hover(1001); eq(t:NumLines(),n+1)
-    eq(last(t),"效率：|cff66b3ff治疗 1.00|r")
+    eq(last(t),"效率：|cff66b3ff治疗 1.15|r")
 end)
 test("pure damage and shields do not invent another effect",function()
     fixture(2003,"造成300点暗影伤害。",3000,100)
-    local t=hover(2003); eq(last(t),"效率：|cffff6666伤害 1.00|r")
+    local t=hover(2003); eq(last(t),"效率：|cffff6666伤害 1.25|r")
     fixture(2004,"吸收300点伤害，持续30秒。",0,100)
-    t=hover(2004); eq(last(t),"效率：|cff66b3ff吸收 2.00|r")
+    t=hover(2004); eq(last(t),"效率：|cff66b3ff吸收 2.17|r")
 end)
 test("a mixed spell with unknown mana shows one status rather than partial scores",function()
     local previous=spells[2001].costs; spells[2001].costs=nil
@@ -483,46 +497,46 @@ test("leech ranks keep blue healing and red damage in one tooltip line",function
     fixture(3002,"在24秒内造成900点暗影伤害，并为施法者恢复等量的生命值。",0,200)
     local t,n=hover(3001,"GetAction")
     for i=1,10 do callbacks[1](t,t.data) end
-    eq(t:NumLines(),n+1); eq(last(t),"效率：|cff66b3ff治疗 2.00|r  |cffff6666伤害 2.00|r")
+    eq(t:NumLines(),n+1); eq(last(t),"效率：|cff66b3ff治疗 2.17|r  |cffff6666伤害 2.17|r")
     t,n=hover(3002); eq(t:NumLines(),n+1)
-    eq(last(t),"效率：|cff66b3ff治疗 3.00|r  |cffff6666伤害 3.00|r")
+    eq(last(t),"效率：|cff66b3ff治疗 3.25|r  |cffff6666伤害 3.25|r")
 end)
 test("proportional leech shares one mana cost and occupied time",function()
     fixture(3003,"在24秒内造成600点暗影伤害，并为施法者恢复相当于伤害量50%的生命值。",0,100)
     local t,n=hover(3003); eq(t:NumLines(),n+1)
-    eq(last(t),"效率：|cff66b3ff治疗 2.00|r  |cffff6666伤害 4.00|r")
+    eq(last(t),"效率：|cff66b3ff治疗 2.17|r  |cffff6666伤害 4.34|r")
     spellHaste=25; t=hover(3003); spellHaste=0
-    eq(last(t),"效率：|cff66b3ff治疗 2.50|r  |cffff6666伤害 5.00|r")
-    t=hover(1001); eq(last(t),"效率：|cff66b3ff治疗 1.00|r")
+    eq(last(t),"效率：|cff66b3ff治疗 2.59|r  |cffff6666伤害 5.19|r")
+    t=hover(1001); eq(last(t),"效率：|cff66b3ff治疗 1.15|r")
 end)
 test("a 1.3 second cast uses the hasted GCD without adjusting cast time twice",function()
     fixture(3101,"恢复600点生命值。",1300,100)
-    eq(last(hover(3101)),"效率：|cff66b3ff治疗 4.00|r")
+    eq(last(hover(3101)),"效率：|cff66b3ff治疗 4.34|r")
     spellHaste=(1500/1300-1)*100
     local t=hover(3101); spellHaste=0
-    eq(last(t),"效率：|cff66b3ff治疗 4.62|r")
+    eq(last(t),"效率：|cff66b3ff治疗 4.86|r")
     fixture(3102,"恢复600点生命值。",2000,100)
     spellHaste=30; t=hover(3102); spellHaste=0
-    eq(last(t),"效率：|cff66b3ff治疗 3.00|r")
+    eq(last(t),"效率：|cff66b3ff治疗 3.45|r")
 end)
 test("instant GCD follows current spell haste and the Forever limits",function()
-    for _,case in ipairs({{0,"4.00"},{25,"5.00"},{50,"6.00"},{100,"6.00"},{-20,"4.00"}}) do
+    for _,case in ipairs({{0,"4.34"},{25,"5.19"},{50,"6.00"},{100,"6.00"},{-20,"4.34"}}) do
         spellHaste=case[1]; local t=hover(1004); spellHaste=0
         eq(last(t),"效率：|cff66b3ff治疗 " .. case[2] .. "|r")
     end
-    eq(last(hover(1004)),"效率：|cff66b3ff治疗 4.00|r")
+    eq(last(hover(1004)),"效率：|cff66b3ff治疗 4.34|r")
 end)
 test("unavailable or invalid haste uses base GCD instead of stale scores",function()
     for _,value in ipairs({secret,false,math.huge,0/0,-100}) do
         spellHaste=value; local t=hover(1004); spellHaste=0
-        eq(last(t),"效率：|cff66b3ff治疗 4.00|r")
+        eq(last(t),"效率：|cff66b3ff治疗 4.34|r")
     end
     local original=UnitSpellHaste; UnitSpellHaste=nil
     local t=hover(1004); UnitSpellHaste=original
-    eq(last(t),"效率：|cff66b3ff治疗 4.00|r")
+    eq(last(t),"效率：|cff66b3ff治疗 4.34|r")
     spellHaste=nil; t=hover(1004); spellHaste=0
-    eq(last(t),"效率：|cff66b3ff治疗 4.00|r")
-    eq(last(hover(1004)),"效率：|cff66b3ff治疗 4.00|r")
+    eq(last(t),"效率：|cff66b3ff治疗 4.34|r")
+    eq(last(hover(1004)),"效率：|cff66b3ff治疗 4.34|r")
 end)
 
 test("missing haste preserves a known shorter base GCD",function()
@@ -537,22 +551,22 @@ test("timing API errors use the default without breaking the next hover",functio
     UnitSpellHaste=function() error("haste not ready") end
     local t=hover(1004)
     GetSpellBaseCooldown=originalBase; UnitSpellHaste=originalHaste
-    eq(last(t),"效率：|cff66b3ff治疗 4.00|r")
+    eq(last(t),"效率：|cff66b3ff治疗 4.34|r")
     spellHaste=25; t=hover(1004); spellHaste=0
-    eq(last(t),"效率：|cff66b3ff治疗 5.00|r")
+    eq(last(t),"效率：|cff66b3ff治疗 5.19|r")
 end)
 
 test("haste becoming available updates the open tooltip without another hover",function()
     spellHaste=nil
     local t,n=hover(1004,"GetAction"); spellHaste=0
-    eq(last(t),"效率：|cff66b3ff治疗 4.00|r")
+    eq(last(t),"效率：|cff66b3ff治疗 4.34|r")
     -- Outside postprocessing, use the primary tooltip rather than a transient callback context.
     t.processingInfo=nil
     spellHaste=25; event("UNIT_SPELL_HASTE","player"); spellHaste=0
-    eq(last(t),"效率：|cff66b3ff治疗 5.00|r"); eq(t:NumLines(),n+1)
+    eq(last(t),"效率：|cff66b3ff治疗 5.19|r"); eq(t:NumLines(),n+1)
     for _,value in ipairs({50,secret,0,25}) do
         spellHaste=value; event("UNIT_SPELL_HASTE","player"); spellHaste=0
-        local expected=value==50 and "6.00" or (value==25 and "5.00" or "4.00")
+        local expected=value==50 and "6.00" or (value==25 and "5.19" or "4.34")
         eq(last(t),"效率：|cff66b3ff治疗 " .. expected .. "|r"); eq(t:NumLines(),n+1)
     end
 end)
@@ -562,14 +576,14 @@ test("haste events use current primary spell even after an appended tooltip",fun
     local t,n=hover(3003,"GetSpellBookItem")
     t.processingInfo={getterName="GetSpellByID",append=true,tooltipData={type=1,id=1004}}
     spellHaste=25; event("UNIT_SPELL_HASTE","player"); spellHaste=0
-    eq(last(t),"效率：|cff66b3ff治疗 2.50|r  |cffff6666伤害 5.00|r")
+    eq(last(t),"效率：|cff66b3ff治疗 2.59|r  |cffff6666伤害 5.19|r")
     eq(t:NumLines(),n+1); eq(queries[#queries],3003)
 end)
 
 test("haste events do not query hidden cleared or unrelated tooltips",function()
     local t,n=hover(1004); local count=#queries
     spellHaste=25; event("UNIT_SPELL_HASTE","target"); spellHaste=0
-    eq(#queries,count); eq(last(t),"效率：|cff66b3ff治疗 4.00|r")
+    eq(#queries,count); eq(last(t),"效率：|cff66b3ff治疗 4.34|r")
     t:Hide(); spellHaste=25; event("UNIT_SPELL_HASTE","player"); spellHaste=0
     eq(#queries,count); eq(t:IsShown(),false)
     t:Show(); t.forbidden=true; event("UNIT_SPELL_HASTE","player"); t.forbidden=false
@@ -586,7 +600,7 @@ test("an off GCD cast does not require haste or invent a one second minimum",fun
     fixture(3103,"恢复600点生命值。",1300,100); spells[3103].gcd=0
     local original=UnitSpellHaste; UnitSpellHaste=nil
     local t=hover(3103); UnitSpellHaste=original
-    eq(last(t),"效率：|cff66b3ff治疗 4.62|r")
+    eq(last(t),"效率：|cff66b3ff治疗 4.86|r")
 end)
 test("no history or saved variables accumulate over repeated hovers",function()
     for i=1,1000 do

@@ -257,7 +257,8 @@ function L.Score(effect, mana, castMS, gcdMS, channelled, channelSeconds)
     end
     occupied = math.max(occupied, gcdMS / 1000)
     if occupied <= 0 then return nil, "time" end
-    local score = effect / mana / occupied
+    -- Weight occupied seconds less than mana; this is a comparison score, not a per-second rate.
+    local score = effect / mana / (occupied ^ 0.8)
     if not L.Number(score) or score <= 0 then return nil, "unsupported" end
     return score
 end

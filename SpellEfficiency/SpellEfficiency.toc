@@ -1,8 +1,8 @@
 ## Interface: 16001
 ## Title: 法术效率 SpellEfficiency
-## Notes: 牧师法术悬停提示：每蓝每秒效果
+## Notes: 牧师法术悬停提示：每蓝效果，时间权重 0.8
 ## Author: Solazhu
-## Version: 0.1.2-test
+## Version: 0.1.3-test
 
 Logic.lua
 Tooltip.lua
