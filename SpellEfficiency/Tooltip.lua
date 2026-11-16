@@ -66,7 +66,8 @@ local function estimate(id, data, info)
     for _, style in ipairs(effectStyles) do
         local effect = effects[style[1]]
         if effect then
-            local score, failure = L.Score(effect, mana, spell.castTime, gcdMS, channelled, channelSeconds or seconds)
+            local score, failure = L.Score(effect, mana, spell.castTime, gcdMS, channelled,
+                channelSeconds or seconds, A.Settings.GetWeight())
             if not score then return reasons[failure] or reasons.unsupported end
             local value = score < 0.005 and "<0.01" or string.format("%.2f", score)
             parts[#parts + 1] = style[3] .. style[2] .. " " .. value .. "|r"
@@ -91,6 +92,7 @@ local function setLine(tooltip, value)
 end
 
 local function onTooltip(tooltip, data, source)
+    if not A.Settings.IsEnabled() then return end
     if tooltip ~= GameTooltip or tooltip:IsForbidden() then return end
     local _, class = UnitClass("player")
     if class ~= "PRIEST" then return end
@@ -103,6 +105,19 @@ local function onTooltip(tooltip, data, source)
     local succeeded, value = pcall(estimate, data.id, data, info)
     setLine(tooltip, succeeded and value or "暂不可用")
     return true
+end
+
+function A.RefreshTooltip()
+    if not installed or GameTooltip:IsForbidden() or not GameTooltip:IsShown() then return end
+    local info = GameTooltip:GetPrimaryTooltipInfo()
+    if not info or not sources[info.getterName] or info.append or not info.tooltipData
+        or info.tooltipData.type ~= Enum.TooltipDataType.Spell then return end
+    if not A.Settings.IsEnabled() then
+        -- Rebuild the native contents to remove our line without hiding the spell tooltip.
+        if lineIndex then GameTooltip:RebuildFromTooltipInfo() end
+    elseif onTooltip(GameTooltip, info.tooltipData, info) then
+        GameTooltip:Show()
+    end
 end
 
 local events = CreateFrame("Frame")
@@ -124,9 +139,7 @@ local function install()
 end
 events:SetScript("OnEvent", function(_, event, unit)
     if event ~= "UNIT_SPELL_HASTE" then install(); return end
-    if unit ~= "player" or not lineIndex or GameTooltip:IsForbidden() or not GameTooltip:IsShown() then return end
-    local info = GameTooltip:GetPrimaryTooltipInfo()
-    if info and onTooltip(GameTooltip, info.tooltipData, info) then GameTooltip:Show() end
+    if unit == "player" and lineIndex then A.RefreshTooltip() end
 end)
 events:RegisterEvent("PLAYER_LOGIN")
 events:RegisterEvent("ADDON_LOADED")

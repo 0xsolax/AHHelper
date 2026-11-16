@@ -245,20 +245,25 @@ function L.ManaCost(costs)
     if auraCount == 0 and baseCount == 1 then return base end
 end
 
-function L.Score(effect, mana, castMS, gcdMS, channelled, channelSeconds)
+function L.Score(effect, mana, castMS, gcdMS, channelled, channelSeconds, weight)
     if not L.Number(effect) or effect <= 0 then return nil, "unsupported" end
     if not L.Number(mana) then return nil, "mana" end
     if mana == 0 then return nil, "free" end
-    if not L.Number(castMS) or not L.Number(gcdMS) then return nil, "time" end
-    local occupied = castMS / 1000
-    if channelled then
-        if not L.Number(channelSeconds) or channelSeconds <= 0 then return nil, "time" end
-        occupied = channelSeconds
+    if weight == nil then weight = 0.8 end
+    if not L.Number(weight) or weight > 1 then return nil, "unsupported" end
+    local occupied = 1
+    if weight > 0 then
+        if not L.Number(castMS) or not L.Number(gcdMS) then return nil, "time" end
+        occupied = castMS / 1000
+        if channelled then
+            if not L.Number(channelSeconds) or channelSeconds <= 0 then return nil, "time" end
+            occupied = channelSeconds
+        end
+        occupied = math.max(occupied, gcdMS / 1000)
+        if occupied <= 0 then return nil, "time" end
     end
-    occupied = math.max(occupied, gcdMS / 1000)
-    if occupied <= 0 then return nil, "time" end
-    -- Weight occupied seconds less than mana; this is a comparison score, not a per-second rate.
-    local score = effect / mana / (occupied ^ 0.8)
+    -- Weight zero means effect per mana, independent of timing data readiness.
+    local score = effect / mana / (occupied ^ weight)
     if not L.Number(score) or score <= 0 then return nil, "unsupported" end
     return score
 end

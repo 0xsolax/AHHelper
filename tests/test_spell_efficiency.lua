@@ -42,14 +42,56 @@ C_SpellBook = {
 }
 GetSpellBaseCooldown = function(id) return 60000, spells[id] and spells[id].gcd end
 UnitSpellHaste = function(unit) eq(unit,"player"); return spellHaste end
-CreateFrame = function()
-    local f = {events={},scripts={}}
+CreateFrame = function(kind, name, parent, template)
+    local f = {events={},scripts={},name=name,parent=parent,shown=true,width=0,height=0,text=""}
+    if name then _G[name]=f end
     function f:RegisterEvent(event) self.events[event]=true end
     function f:RegisterUnitEvent(event, unit) self.events[event]=unit end
     function f:UnregisterEvent(event) self.events[event]=nil end
     function f:SetScript(event, fn) self.scripts[event]=fn end
+    function f:SetSize(w,h) self.width=w; self.height=h end
+    function f:SetWidth(w) self.width=w end
+    function f:GetWidth() return self.width end
+    function f:GetHeight() return self.height end
+    function f:SetPoint(...) self.point={...} end
+    function f:ClearAllPoints() self.point=nil end
+    function f:SetText(value) self.text=tostring(value) end
+    function f:GetText() return self.text end
+    function f:SetChecked(value) self.checked=value end
+    function f:GetChecked() return self.checked end
+    function f:GetName() return self.name end
+    function f:GetFrameLevel() return self.level or 1 end
+    function f:SetFrameLevel(level) self.level=level end
+    function f:GetEffectiveScale() return self.scale or 1 end
+    function f:GetCenter() return self.x or 200,self.y or 300 end
+    function f:IsShown() return self.shown end
+    function f:Show()
+        local changed=not self.shown; self.shown=true
+        if changed and self.scripts.OnShow then self.scripts.OnShow(self) end
+    end
+    function f:Hide()
+        local changed=self.shown; self.shown=false
+        if changed and self.scripts.OnHide then self.scripts.OnHide(self) end
+    end
+    function f:Click(key) if self.scripts.OnClick then self.scripts.OnClick(self,key or "LeftButton") end end
+    function f:SetTexture(value) self.texture=value end
+    function f:SetDesaturated(value) self.desaturated=value end
+    function f:CreateTexture() return CreateFrame("Texture",nil,self) end
+    function f:CreateFontString() return CreateFrame("FontString",nil,self) end
+    for _,method in ipairs({"SetBackdrop","SetBackdropColor","SetAllPoints","SetFrameStrata",
+        "SetMovable","EnableMouse","RegisterForDrag","StartMoving","StopMovingOrSizing",
+        "SetClampedToScreen","RegisterForClicks","SetHighlightTexture","SetTexCoord",
+        "SetAutoFocus","SetMaxLetters","ClearFocus","SetJustifyH","SetTextColor"}) do
+        f[method]=function() end
+    end
+    if template=="UICheckButtonTemplate" then f.Text=f:CreateFontString() end
     frames[#frames+1]=f; return f
 end
+UIParent=CreateFrame("Frame","UIParent")
+Minimap=CreateFrame("Frame","Minimap",UIParent); Minimap:SetSize(140,140)
+UISpecialFrames={}
+local cursorX,cursorY=200,300
+GetCursorPosition=function() return cursorX,cursorY end
 TooltipDataProcessor = {AddTooltipPostCall=function(kind, callback)
     eq(kind,1); callbacks[#callbacks+1]=callback
 end}
@@ -77,6 +119,18 @@ local function newTooltip(name)
     function t:IsShown() return self.shown end
     function t:Show() self.shown=true end
     function t:Hide() self.shown=false end
+    function t:SetOwner(owner) self.owner=owner end
+    function t:IsOwned(owner) return self.owner==owner end
+    function t:SetText(value) self:ClearLines(); self:AddLine(value) end
+    function t:RebuildFromTooltipInfo()
+        local info=self.info; if not info then return end
+        self.rebuilds=(self.rebuilds or 0)+1
+        self:ClearLines(); self.info=info; self.data=info.tooltipData; self.processingInfo=info
+        self:AddLine("技能名称")
+        for _,line in ipairs(self.data.lines) do if line.leftText then self:AddLine(line.leftText) end end
+        for _,callback in ipairs(callbacks) do callback(self,self.data) end
+        self:Show()
+    end
     return t
 end
 GameTooltip = newTooltip("GameTooltip")
@@ -602,14 +656,136 @@ test("an off GCD cast does not require haste or invent a one second minimum",fun
     local t=hover(3103); UnitSpellHaste=original
     eq(last(t),"效率：|cff66b3ff治疗 4.86|r")
 end)
-test("no history or saved variables accumulate over repeated hovers",function()
+test("repeated hovers retain only three settings and no history",function()
     for i=1,1000 do
         local t,n=hover(i%2==0 and 1001 or 1002,"GetAction")
         eq(t:NumLines(),n+1)
     end
-    eq(SpellEfficiencyDB,nil)
-    for line in io.lines(PROJECT_ROOT .. "/SpellEfficiency/SpellEfficiency.toc") do
-        assert(not line:find("SavedVariables",1,true))
+    local count=0
+    for key in pairs(SpellEfficiencyDB) do
+        assert(key=="enabled" or key=="timeWeight" or key=="minimapAngle")
+        count=count+1
     end
+    eq(count,3)
+    local declared=false
+    for line in io.lines(PROJECT_ROOT .. "/SpellEfficiency/SpellEfficiency.toc") do
+        if line=="## SavedVariablesPerCharacter: SpellEfficiencyDB" then declared=true end
+    end
+    eq(declared,true)
+end)
+test("manual time weights cover mana only original timing and intermediate values",function()
+    near(L.Score(600,100,3000,1500,false,nil,0),6)
+    near(L.Score(600,100,3000,1500,false,nil,1),2)
+    near(L.Score(600,100,3000,1500,false,nil,0.5),3.4641016151377544)
+    near(L.Score(600,100,nil,nil,true,nil,0),6)
+    eq(L.Score(600,0,nil,nil,false,nil,0),nil)
+    for _,weight in ipairs({-0.1,1.1,secret,false,math.huge,0/0}) do
+        eq(L.Score(600,100,3000,1500,false,nil,weight),nil)
+    end
+end)
+test("minimap opens settings and applies a decimal weight to both tooltip effects",function()
+    local button=SpellEfficiencyMinimapButton
+    assert(button,"missing minimap button"); button:Click()
+    local panel=SpellEfficiencySettingsFrame
+    assert(panel and panel:IsShown(),"settings must open")
+    eq(panel.weight:GetText(),"0.8"); eq(panel.enabled:GetChecked(),true)
+    panel.weight:SetText("0.5"); panel.apply:Click()
+    eq(SpellEfficiencyDB.timeWeight,0.5)
+    eq(last(hover(3003)),"效率：|cff66b3ff治疗 2.45|r  |cffff6666伤害 4.90|r")
+    panel.weight:SetText("1"); panel.weight.scripts.OnEnterPressed(panel.weight)
+    eq(last(GameTooltip),"效率：|cff66b3ff治疗 2.00|r  |cffff6666伤害 4.00|r")
+    panel.defaults:Click(); eq(SpellEfficiencyDB.timeWeight,0.8)
+    eq(last(GameTooltip),"效率：|cff66b3ff治疗 2.17|r  |cffff6666伤害 4.34|r")
+end)
+test("invalid settings preserve both saved fields and the active tooltip",function()
+    local panel=SpellEfficiencySettingsFrame
+    local t=hover(1004); local text=last(t); local count=#queries
+    for _,value in ipairs({"","abc","-0.1","1.1","50%","nan","inf"}) do
+        panel.weight:SetText(value); panel.enabled:SetChecked(false); panel.apply:Click()
+        eq(SpellEfficiencyDB.timeWeight,0.8); eq(SpellEfficiencyDB.enabled,true)
+        eq(last(t),text); eq(#queries,count)
+        assert(panel.error:GetText()~="","invalid input needs a visible explanation")
+    end
+    panel:Hide(); SpellEfficiencyMinimapButton:Click()
+    eq(panel.weight:GetText(),"0.8"); eq(panel.enabled:GetChecked(),true)
+end)
+test("disabling removes the current efficiency line and prevents further spell queries",function()
+    local t,n=hover(1004); local count=#queries
+    local panel=SpellEfficiencySettingsFrame
+    panel.enabled:SetChecked(false); panel.weight:SetText("0.8"); panel.apply:Click()
+    eq(SpellEfficiencyDB.enabled,false)
+    eq(t:NumLines(),n); eq(t.rebuilds,1); eq(#queries,count)
+    event("UNIT_SPELL_HASTE","player"); eq(#queries,count)
+    t,n=hover(1004); eq(t:NumLines(),n); eq(#queries,count)
+    SpellEfficiencyMinimapButton:Click("RightButton")
+    eq(SpellEfficiencyDB.enabled,true); eq(t:NumLines(),n+1)
+    eq(last(t),"效率：|cff66b3ff治疗 4.34|r")
+end)
+test("settings changes cannot resurrect hidden or unrelated spell data",function()
+    local t=hover(1004); t:Hide(); local count=#queries
+    assert(A.Settings.Apply(true,0.25)); eq(t:IsShown(),false); eq(#queries,count)
+    for _,getter in ipairs({"GetBagItem","GetUnitAura","GetHyperlink"}) do
+        local n; t,n=hover(1004,getter); count=#queries
+        assert(A.Settings.Apply(false,0.5)); assert(A.Settings.Apply(true,0.8))
+        eq(t:NumLines(),n); eq(#queries,count)
+    end
+end)
+test("zero time weight ignores missing timing but still requires known mana",function()
+    assert(A.Settings.Apply(true,0))
+    local old=spells[1004].cast; spells[1004].cast=nil
+    local t=hover(1004); spells[1004].cast=old
+    eq(last(t),"效率：|cff66b3ff治疗 6.00|r")
+    eq(last(hover(1003,"GetAction","造成600点暗影伤害。",true)),"效率：|cffff6666伤害 6.00|r")
+    local costs=spells[1004].costs; spells[1004].costs=nil
+    t=hover(1004); spells[1004].costs=costs
+    eq(last(t),"效率：耗蓝未知")
+    assert(A.Settings.Apply(true,0.8))
+end)
+test("dragging uses minimap scale and stops all update work on release or hide",function()
+    local button=SpellEfficiencyMinimapButton
+    Minimap.scale=2; cursorX=400; cursorY=800
+    button.scripts.OnDragStart(button); assert(button.scripts.OnUpdate)
+    button.scripts.OnUpdate(button)
+    near(SpellEfficiencyDB.minimapAngle,90)
+    near(button.point[4],0); near(button.point[5],78)
+    button.scripts.OnDragStop(button); eq(button.scripts.OnUpdate,nil)
+    button.scripts.OnDragStart(button); button:Hide(); eq(button.scripts.OnUpdate,nil)
+    button:Show(); Minimap.scale=1
+    for _,frame in ipairs(frames) do eq(frame.scripts.OnUpdate,nil) end
+end)
+test("settings reload restores only the current characters three scalar values",function()
+    local function reload(saved, alreadyLoggedIn)
+        SpellEfficiencyDB=saved; loggedIn=alreadyLoggedIn or false; callbacks={}; frames={}; A={}
+        GameTooltip=newTooltip("GameTooltip"); UISpecialFrames={}
+        SpellEfficiencyMinimapButton=nil; SpellEfficiencySettingsFrame=nil
+        for line in io.lines(PROJECT_ROOT .. "/SpellEfficiency/SpellEfficiency.toc") do
+            if line:match("%.lua$") then assert(loadfile(PROJECT_ROOT .. "/SpellEfficiency/" .. line))("SpellEfficiency",A) end
+        end
+        eq(SpellEfficiencyDB,saved)
+        event("ADDON_LOADED","SpellEfficiency")
+        if not loggedIn then loggedIn=true; event("PLAYER_LOGIN") end
+    end
+    reload({enabled=false,timeWeight=0.25,minimapAngle=90})
+    eq(SpellEfficiencyDB.enabled,false); eq(SpellEfficiencyDB.timeWeight,0.25)
+    near(SpellEfficiencyMinimapButton.point[5],78)
+    SpellEfficiencyMinimapButton:Click(); local panel=SpellEfficiencySettingsFrame
+    eq(panel.enabled:GetChecked(),false); eq(panel.weight:GetText(),"0.25")
+    local t,n=hover(1004); eq(t:NumLines(),n)
+    reload({enabled="bad",timeWeight=2,minimapAngle=math.huge})
+    eq(SpellEfficiencyDB.enabled,true); eq(SpellEfficiencyDB.timeWeight,0.8)
+    eq(SpellEfficiencyDB.minimapAngle,225)
+    reload(nil); eq(SpellEfficiencyDB.timeWeight,0.8)
+    local buttons=0
+    event("ADDON_LOADED","UnrelatedAddon"); event("PLAYER_LOGIN")
+    for _,frame in ipairs(frames) do if frame.name=="SpellEfficiencyMinimapButton" then buttons=buttons+1 end end
+    eq(buttons,1)
+    reload({enabled=true,timeWeight=0,minimapAngle=0},true)
+    eq(last(hover(1004)),"效率：|cff66b3ff治疗 6.00|r")
+    local map=Minimap; Minimap=nil; reload(nil)
+    eq(SpellEfficiencyMinimapButton,nil)
+    Minimap=map; event("ADDON_LOADED","Blizzard_Minimap")
+    assert(SpellEfficiencyMinimapButton)
+    playerClass="MAGE"; reload(nil); eq(SpellEfficiencyMinimapButton,nil); eq(#callbacks,0)
+    playerClass="PRIEST"; reload(nil)
 end)
 print("TOTAL " .. passed .. " spell-efficiency tests passed")
