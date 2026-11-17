@@ -1,4 +1,4 @@
-local _, A = ...
+local addonName, A = ...
 local PAGE_SIZE = 12
 local page = 1
 
@@ -182,9 +182,9 @@ SlashCmdList.ADDONCPU = ToggleWindow
 if Minimap then
     local button = CreateFrame("Button", "AddonCPUMinimapButton", Minimap)
     button:SetSize(32, 32)
-    button:SetPoint("CENTER", Minimap, "LEFT", -8, -30)
     button:SetFrameLevel(Minimap:GetFrameLevel() + 5)
     button:RegisterForClicks("LeftButtonUp")
+    button:RegisterForDrag("LeftButton")
     button:SetHighlightTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
     local icon = button:CreateTexture(nil, "BACKGROUND")
     icon:SetSize(20, 20)
@@ -194,15 +194,77 @@ if Minimap then
     border:SetSize(52, 52)
     border:SetPoint("TOPLEFT", button, "TOPLEFT", 0, 0)
     border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
-    button:SetScript("OnClick", ToggleWindow)
+    local db, dragging, suppressClick
+    local function Position()
+        local angle = math.rad(db and db.minimapAngle or 200)
+        button:ClearAllPoints()
+        button:SetPoint("CENTER", Minimap, "CENTER", math.cos(angle) * (Minimap:GetWidth() / 2 + 10),
+            math.sin(angle) * (Minimap:GetHeight() / 2 + 10))
+    end
+    local function Drag()
+        local x, y = GetCursorPosition()
+        local cx, cy = Minimap:GetCenter()
+        if not x or not y or not cx or not cy then return end
+        local scale = Minimap:GetEffectiveScale()
+        local dx = (x / scale - cx) / (Minimap:GetWidth() / 2 + 10)
+        local dy = (y / scale - cy) / (Minimap:GetHeight() / 2 + 10)
+        if dx == 0 and dy == 0 then return end
+        db.minimapAngle = math.deg(math.atan2(dy, dx)) % 360
+        Position()
+    end
+    local function StopDrag()
+        dragging = false
+        button:SetScript("OnUpdate", nil)
+    end
+    local function FinishDrag()
+        if dragging then Drag() end
+        StopDrag()
+    end
+    button:RegisterEvent("ADDON_LOADED")
+    button:SetScript("OnEvent", function(self, _, name)
+        if name ~= addonName then return end
+        if type(AddonCPUDB) ~= "table" then AddonCPUDB = {} end
+        db = AddonCPUDB
+        local angle = db.minimapAngle
+        if type(angle) ~= "number" or angle ~= angle or angle == math.huge or angle == -math.huge then
+            angle = 200
+        end
+        db.minimapAngle = angle % 360
+        self:UnregisterEvent("ADDON_LOADED")
+        self:SetScript("OnEvent", nil)
+        Position()
+    end)
+    button:SetScript("OnMouseDown", function(_, mouseButton)
+        if mouseButton == "LeftButton" then StopDrag(); suppressClick = false end
+    end)
+    button:SetScript("OnMouseUp", function(_, mouseButton)
+        if mouseButton == "LeftButton" then FinishDrag() end
+    end)
+    button:SetScript("OnClick", function(_, mouseButton)
+        if mouseButton == "LeftButton" and not dragging and not suppressClick then ToggleWindow() end
+    end)
+    button:SetScript("OnDragStart", function(self)
+        if not db then return end
+        dragging, suppressClick = true, true
+        HideTooltip(self)
+        self:SetScript("OnUpdate", function()
+            if IsMouseButtonDown("LeftButton") then Drag() else FinishDrag() end
+        end)
+        Drag()
+    end)
+    button:SetScript("OnDragStop", FinishDrag)
     button:SetScript("OnEnter", function(self)
+        if dragging then return end
         GameTooltip:SetOwner(self, "ANCHOR_LEFT")
         GameTooltip:SetText("插件耗时")
         GameTooltip:AddLine("左键：打开 / 关闭窗口", 1, 1, 1)
+        GameTooltip:AddLine("按住左键拖动：沿小地图边缘移动并保存位置", 1, 1, 1)
         GameTooltip:AddLine("数据需在窗口内手动刷新", 0.8, 0.8, 0.8)
         GameTooltip:Show()
     end)
     button:SetScript("OnLeave", HideTooltip)
-    button:SetScript("OnHide", HideTooltip)
+    button:SetScript("OnHide", function(self) StopDrag(); HideTooltip(self) end)
+    button:SetScript("OnShow", Position)
+    Position()
     A.minimapButton = button
 end

@@ -1,6 +1,6 @@
 # 独立插件耗时监控交付记录
 
-最新交付：0.1.1-test 已安装到游戏目录，小地图入口与安装验收记录见文末。
+最新交付：0.1.2-test 已安装到游戏目录，支持小地图按钮沿边缘拖动并保存位置；验收记录见文末。
 
 - 负责人、修改人、操作人：Solazhu
 - 日期：2026-11-16
@@ -83,3 +83,28 @@ SHA256：`0005d045ce73579daa19a08a1b4ace55c86eea8578b70f3b971561ab2f5bcc87`。
 从实际安装目录按 TOC 加载，在 Lua 5.1 模拟环境再次通过 29 项测试。证据为 `.tools/ship-addon-cpu-0.1.1/install-before.json`、`install-receipt.json`、`installed-tests.log` 和 `install-final-readback.json`。插件运行文件来自提交 `276610cd6eb4f39a98ba122df9162b32b08b678b`；本次未合并或推送分支。
 
 进入游戏后，在插件列表确认“插件耗时”已启用，点击小地图左下边缘的怀表按钮，或输入 `/addoncpu` 打开窗口，再点击“刷新”。真实客户端的图标位置、接口取数和帧率影响仍待用户验收；文件校验与模拟测试不替代该验收。
+
+## 2026-11-17：0.1.2-test 小地图按钮拖动
+
+负责人、修改人、操作人：Solazhu。按用户要求，将固定小地图按钮改为按住左键沿地图边缘拖动；沿用原有普通点击开关和手动刷新行为。只在 `AddonCPUDB.minimapAngle` 保存位置角度，加载保存数据后恢复，并立即取消初始化事件监听。缺失或无效角度使用默认左下位置，保留保存表内其他已有字段。
+
+鼠标坐标按小地图实际缩放换算，以小地图中心和宽高计算边缘位置。沿用项目已有的小地图拖动方式，坐标处理也核对了 [LibDBIcon 实现](https://github.com/Questie/Questie/blob/master/Libs/LibDBIcon-1.0/LibDBIcon-1.0.lua)。没有引入库或其他运行文件。
+
+位置更新仅在拖动期间存在；松开、拖动结束、鼠标释放于按钮外或按钮隐藏后移除更新回调。拖动释放的点击不会开关窗口，下一次普通点击恢复正常。拖动与悬停不读取 CPU 统计；耗时快照仍只在点击“刷新”时更新。
+
+修改基于 `codex/addon-cpu` 的 `a248981ddd32823e81371f4135157f58fac52e57`，仅涉及 Core.lua、TOC、README、对应测试和本报告，共 5 个文件。根目录的已有开发工作保留。
+
+证据目录：`J:\SOFTWARE\addons\.tools\ship-addon-cpu-0.1.2`。
+
+- `tests-before.log`：新增拖动测试在旧版本上因缺少拖动入口失败。
+- `tests-first.log`、`package-tests-final.log`、`installed-tests.log`：源码、压缩包解压文件和实际游戏安装文件分别通过 42 项 Lua 5.1 离线测试。覆盖原有手动刷新，以及四向边缘约束、远近鼠标距离、界面缩放、不同地图尺寸、两种释放回调顺序、停止更新、提示所有权、保存恢复及异常角度。
+- `package-manifest.json`：运行包仍只有 3 个文件，与源码逐字节匹配。
+- `install-before.json`、`install-receipt.json`、`final-readback.json`：旧版完整备份、新版安装回读、其他插件及保存数据保护记录。
+
+测试包：`J:\SOFTWARE\addons\dist\AddonCPU-0.1.2-test.zip`。
+
+SHA256：`5969ed27debd27c8b69c2a5dfaa8dad94ee2c6fd7d88e4677830b95e2885ff86`。
+
+沿用本会话已授权的游戏安装，先完整备份旧版 3 个文件到 `J:\SOFTWARE\addons\backups\AddonCPU-before-0.1.2-test-20261117`，再更新 `F:\GAME\World of Warcraft\_forever_\Interface\AddOns\AddonCPU`。安装文件回读通过，29 个其他插件文件及 66 个 SavedVariables 文件前后哈希一致。没有由安装程序写入新位置数据；角度由游戏加载插件后保存。未合并或推送分支。
+
+实机验收：输入 `/reload`，按住怀表图标的左键沿小地图拖动，松开后确认窗口没有误开关；普通点击应正常开关窗口。再次 `/reload` 检查位置是否保留，并确认耗时数值仍只在点击“刷新”后变化。离线模拟验证不代表真实鼠标交互、客户端保存加载或帧率已经验收。

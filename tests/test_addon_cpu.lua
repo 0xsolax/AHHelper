@@ -7,6 +7,25 @@ local frameType = getmetatable(Minimap)
 function frameType:GetFrameLevel() return self.frameLevel or 1 end
 function frameType:SetFrameLevel(level) self.frameLevel = level end
 function frameType:RegisterForClicks(...) self.clicks = {...} end
+function frameType:UnregisterEvent(event)
+    if self.registered then
+        self.registered[event] = nil
+        if not next(self.registered) then self.registered = nil end
+    end
+end
+function Minimap:GetCenter() return MOCK.mapX, MOCK.mapY end
+function GetCursorPosition() return MOCK.cursorX, MOCK.cursorY end
+function IsMouseButtonDown() return MOCK.leftDown == true end
+MOCK.mapX, MOCK.mapY = 400, 300
+local originalClick = frameType.Click
+function frameType:Click()
+    if not self.enabled or not self:IsVisible() then return end
+    MOCK.leftDown = true
+    if self.scripts.OnMouseDown then self.scripts.OnMouseDown(self, "LeftButton") end
+    MOCK.leftDown = false
+    if self.scripts.OnMouseUp then self.scripts.OnMouseUp(self, "LeftButton") end
+    originalClick(self)
+end
 local passed, reading, metricCalls, listCalls = 0, false, 0, 0
 local firstFrame = #MOCK.frames + 1
 local enabled, failName = true, nil
@@ -57,13 +76,17 @@ C_AddOnProfiler = {
         error("unknown addon")
     end,
 }
-local A = {}
-for line in io.lines(ADDON_DIR .. "/AddonCPU.toc") do
-    local entry = line:match("^%s*(.-)%s*$")
-    if entry ~= "" and entry:sub(1, 1) ~= "#" then
-        assert(loadfile(ADDON_DIR .. "/" .. entry))("AddonCPU", A)
+local function LoadFiles()
+    local instance = {}
+    for line in io.lines(ADDON_DIR .. "/AddonCPU.toc") do
+        local entry = line:match("^%s*(.-)%s*$")
+        if entry ~= "" and entry:sub(1, 1) ~= "#" then
+            assert(loadfile(ADDON_DIR .. "/" .. entry))("AddonCPU", instance)
+        end
     end
+    return instance
 end
+local A = LoadFiles()
 local function refresh()
     reading = true
     local ok, err = pcall(function() A.UI.refresh:Click() end)
@@ -85,6 +108,25 @@ test("load provides a minimap entry without opening the main UI or reading metri
     eq(A.minimapButton:GetParent(), Minimap); eq(A.UI, nil)
     eq(metricCalls, 0); eq(listCalls, 0)
     eq(SLASH_ADDONCPU1, "/addoncpu"); assert(SlashCmdList.ADDONCPU)
+end)
+test("minimap exposes drag handlers without idle update work", function()
+    assert(A.minimapButton.scripts.OnDragStart, "missing drag start")
+    assert(A.minimapButton.scripts.OnDragStop, "missing drag stop")
+    eq(A.minimapButton.scripts.OnUpdate, nil)
+end)
+test("saved angle is restored after own addon load and initialization unsubscribes", function()
+    eq(AddonCPUDB, nil)
+    local button = A.minimapButton
+    button.scripts.OnEvent(button, "ADDON_LOADED", "OtherAddon")
+    eq(AddonCPUDB, nil)
+    local saved = {minimapAngle = 90, existing = "keep"}
+    AddonCPUDB = saved
+    button.scripts.OnEvent(button, "ADDON_LOADED", "AddonCPU")
+    eq(AddonCPUDB, saved); eq(AddonCPUDB.existing, "keep")
+    eq(button.scripts.OnEvent, nil); eq(button.registered, nil)
+    local point = button.points[1]
+    eq(point[3], "CENTER"); assert(math.abs(point[4]) < 0.001)
+    assert(math.abs(point[5] - 80) < 0.001)
 end)
 test("first minimap click opens the window without collecting data", function()
     A.minimapButton:Click()
@@ -248,7 +290,124 @@ test("window close and escape registration do not change statistics", function()
     eq(metricCalls, before); eq(UISpecialFrames[#UISpecialFrames], "AddonCPUFrame")
     SlashCmdList.ADDONCPU(); eq(metricCalls, before)
 end)
-test("no addon-owned frame registers background scripts or game events", function()
+local function near(actual, expected)
+    assert(math.abs(actual - expected) < 0.0001, "expected " .. expected .. ", got " .. tostring(actual))
+end
+local function cursor(dx, dy)
+    local scale = Minimap:GetEffectiveScale()
+    MOCK.cursorX, MOCK.cursorY = (MOCK.mapX + dx) * scale, (MOCK.mapY + dy) * scale
+end
+local function startDrag(button, dx, dy)
+    cursor(dx, dy); MOCK.leftDown = true
+    button.scripts.OnMouseDown(button, "LeftButton")
+    button.scripts.OnDragStart(button)
+end
+local function stopDrag(button)
+    MOCK.leftDown = false; button.scripts.OnDragStop(button)
+end
+test("drag projects near and far cursor positions onto the minimap rim", function()
+    local button, before, snapshot = A.minimapButton, metricCalls, A.snapshot
+    startDrag(button, 1000, 0)
+    near(button.points[1][4], 80); near(button.points[1][5], 0)
+    for _, point in ipairs({{0, 1, 0, 80}, {-200, 0, -80, 0}, {0, -500, 0, -80}}) do
+        cursor(point[1], point[2]); button.scripts.OnUpdate(button, 0.016)
+        near(button.points[1][4], point[3]); near(button.points[1][5], point[4])
+    end
+    stopDrag(button); eq(button.scripts.OnUpdate, nil)
+    eq(metricCalls, before); eq(A.snapshot, snapshot); assert(A.UI.frame:IsShown())
+end)
+test("drag converts cursor scale and respects the map dimensions", function()
+    local button = A.minimapButton
+    UIParent:SetScale(0.8); Minimap:SetScale(0.75); Minimap:SetSize(180, 140)
+    startDrag(button, 100, 80)
+    near(AddonCPUDB.minimapAngle, 45)
+    near(button.points[1][4], 100 / math.sqrt(2)); near(button.points[1][5], 80 / math.sqrt(2))
+    stopDrag(button); UIParent:SetScale(1); Minimap:SetScale(1); Minimap:SetSize(140, 140)
+end)
+test("release updates the final position without toggling the window", function()
+    local button = A.minimapButton
+    startDrag(button, 100, 0); cursor(0, 100); stopDrag(button)
+    near(AddonCPUDB.minimapAngle, 90)
+    button.scripts.OnMouseUp(button, "LeftButton")
+    button.scripts.OnClick(button, "LeftButton")
+    assert(A.UI.frame:IsShown()); eq(button.scripts.OnUpdate, nil)
+    button:Click(); assert(not A.UI.frame:IsShown())
+    button:Click(); assert(A.UI.frame:IsShown())
+end)
+test("mouse-up before drag-stop also suppresses the release click", function()
+    local button = A.minimapButton
+    startDrag(button, 100, 0); cursor(-100, 0); MOCK.leftDown = false
+    button.scripts.OnMouseUp(button, "LeftButton")
+    button.scripts.OnClick(button, "LeftButton")
+    button.scripts.OnDragStop(button)
+    near(AddonCPUDB.minimapAngle, 180)
+    assert(A.UI.frame:IsShown()); eq(button.scripts.OnUpdate, nil)
+end)
+test("mouse release outside the button clears the drag updater", function()
+    local button = A.minimapButton
+    startDrag(button, 0, 100); MOCK.leftDown = false
+    button.scripts.OnUpdate(button, 0.016)
+    eq(button.scripts.OnUpdate, nil); assert(A.UI.frame:IsShown())
+end)
+test("hiding during drag stops work and preserves the last valid angle", function()
+    local button = A.minimapButton
+    startDrag(button, -100, -100); local angle = AddonCPUDB.minimapAngle
+    button:Hide(); eq(button.scripts.OnUpdate, nil)
+    cursor(100, 0); MOCK.leftDown = false; button:Show()
+    near(AddonCPUDB.minimapAngle, angle); eq(button.scripts.OnUpdate, nil)
+    button:Click(); assert(not A.UI.frame:IsShown())
+    button:Click(); assert(A.UI.frame:IsShown())
+end)
+test("drag tooltip stays hidden without dismissing another tooltip owner", function()
+    local button = A.minimapButton
+    button.scripts.OnEnter(button); assert(GameTooltip:IsShown())
+    startDrag(button, 100, 0); assert(not GameTooltip:IsShown())
+    button.scripts.OnEnter(button); assert(not GameTooltip:IsShown())
+    GameTooltip:SetOwner(UIParent); GameTooltip:Show()
+    button:Hide(); assert(GameTooltip:IsShown())
+    MOCK.leftDown = false; button:Show(); GameTooltip:Hide()
+end)
+test("cursor at the map center and unavailable geometry keep the last angle", function()
+    local button = A.minimapButton
+    startDrag(button, 100, 100); local angle = AddonCPUDB.minimapAngle
+    cursor(0, 0); button.scripts.OnUpdate(button, 0.016); near(AddonCPUDB.minimapAngle, angle)
+    local x = MOCK.mapX; MOCK.mapX = nil
+    button.scripts.OnUpdate(button, 0.016); near(AddonCPUDB.minimapAngle, angle)
+    MOCK.mapX = x; stopDrag(button)
+end)
+test("right click cannot toggle the window or reset drag click suppression", function()
+    local button = A.minimapButton
+    startDrag(button, 0, 100); stopDrag(button)
+    button.scripts.OnMouseDown(button, "RightButton")
+    button.scripts.OnClick(button, "RightButton")
+    button.scripts.OnClick(button, "LeftButton")
+    assert(A.UI.frame:IsShown()); eq(button.scripts.OnUpdate, nil)
+end)
+local function RestoreButton(saved)
+    AddonCPUDB = nil
+    local instance = LoadFiles()
+    AddonCPUDB = saved
+    instance.minimapButton.scripts.OnEvent(instance.minimapButton, "ADDON_LOADED", "AddonCPU")
+    return instance.minimapButton
+end
+test("saved drag angle survives a simulated reload", function()
+    local saved, angle = AddonCPUDB, AddonCPUDB.minimapAngle
+    local button = RestoreButton(saved)
+    eq(AddonCPUDB, saved); near(AddonCPUDB.minimapAngle, angle)
+    near(button.points[1][4], math.cos(math.rad(angle)) * 80)
+    near(button.points[1][5], math.sin(math.rad(angle)) * 80)
+end)
+test("invalid saved angles use the default without destroying unrelated fields", function()
+    for _, value in ipairs({"bad", 0/0, math.huge, -math.huge}) do
+        local saved = {minimapAngle = value, existing = "keep"}
+        RestoreButton(saved); eq(AddonCPUDB, saved)
+        near(AddonCPUDB.minimapAngle, 200); eq(AddonCPUDB.existing, "keep")
+    end
+    RestoreButton("bad"); near(AddonCPUDB.minimapAngle, 200)
+    RestoreButton(nil); near(AddonCPUDB.minimapAngle, 200)
+    RestoreButton({minimapAngle = -450}); near(AddonCPUDB.minimapAngle, 270)
+end)
+test("no idle addon-owned frame retains update scripts or game events", function()
     for i = firstFrame, #MOCK.frames do
         local frame = MOCK.frames[i]
         eq(frame.scripts.OnUpdate, nil); eq(frame.scripts.OnEvent, nil)

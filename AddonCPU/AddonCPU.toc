@@ -2,6 +2,7 @@
 ## Title: 插件耗时 AddonCPU
 ## Notes: 手动刷新各插件的会话平均耗时与峰值
 ## Author: Solazhu
-## Version: 0.1.1-test
+## Version: 0.1.2-test
+## SavedVariables: AddonCPUDB
 
 Core.lua
