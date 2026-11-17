@@ -16,6 +16,7 @@ end
 -- Load the real manifest; missing runtime files or dependencies must fail the test.
 local callbacks, frames, spells, books, queries = {}, {}, {}, {}, {}
 local playerClass, loggedIn, spellHaste = "PRIEST", false, 0
+local channel, channelReads = nil, 0
 local secret = {}
 issecretvalue = function(value) return value == secret end
 GetLocale = function() return "zhCN" end
@@ -42,6 +43,12 @@ C_SpellBook = {
 }
 GetSpellBaseCooldown = function(id) return 60000, spells[id] and spells[id].gcd end
 UnitSpellHaste = function(unit) eq(unit,"player"); return spellHaste end
+UnitChannelInfo = function(unit)
+    eq(unit,"player"); channelReads=channelReads+1
+    if not channel then return end
+    if channel.fail then error("channel not ready") end
+    return "苦修","苦修",1,channel.startMS,channel.endMS,false,false,channel.id
+end
 CreateFrame = function(kind, name, parent, template)
     local f = {events={},scripts={},name=name,parent=parent,shown=true,width=0,height=0,text=""}
     if name then _G[name]=f end
@@ -125,6 +132,9 @@ local function newTooltip(name)
     function t:RebuildFromTooltipInfo()
         local info=self.info; if not info then return end
         self.rebuilds=(self.rebuilds or 0)+1
+        -- Native rebuilding discards cached tooltipData and calls the original getter again.
+        local spell=info.tooltipData and spells[info.tooltipData.id]
+        if spell and spell.freshTooltip then info.tooltipData=spell.freshTooltip end
         self:ClearLines(); self.info=info; self.data=info.tooltipData; self.processingInfo=info
         self:AddLine("技能名称")
         for _,line in ipairs(self.data.lines) do if line.leftText then self:AddLine(line.leftText) end end
@@ -134,11 +144,11 @@ local function newTooltip(name)
     return t
 end
 GameTooltip = newTooltip("GameTooltip")
-local function event(name, unit)
+local function event(name, unit, ...)
     for _,frame in ipairs(frames) do
         local registered=frame.events[name]
         if (registered==true or (unit and registered==unit)) and frame.scripts.OnEvent then
-            frame.scripts.OnEvent(frame,name,unit)
+            frame.scripts.OnEvent(frame,name,unit,...)
         end
     end
 end
@@ -711,10 +721,11 @@ test("invalid settings preserve both saved fields and the active tooltip",functi
 end)
 test("disabling removes the current efficiency line and prevents further spell queries",function()
     local t,n=hover(1004); local count=#queries
+    local rebuilds=t.rebuilds or 0
     local panel=SpellEfficiencySettingsFrame
     panel.enabled:SetChecked(false); panel.weight:SetText("0.8"); panel.apply:Click()
     eq(SpellEfficiencyDB.enabled,false)
-    eq(t:NumLines(),n); eq(t.rebuilds,1); eq(#queries,count)
+    eq(t:NumLines(),n); eq(t.rebuilds,rebuilds+1); eq(#queries,count)
     event("UNIT_SPELL_HASTE","player"); eq(#queries,count)
     t,n=hover(1004); eq(t:NumLines(),n); eq(#queries,count)
     SpellEfficiencyMinimapButton:Click("RightButton")
@@ -1036,5 +1047,135 @@ test("penance failed reads clear old values and recover on the next hover",funct
     spells[5001].costs={{type=0,cost=150}}
     eq(last(hover(5001,"GetAction",penanceCN:gsub("每1秒","每0秒"),true)),"效率：无法估算")
     eq(last(hover(5001,"GetAction",nil,true)),"效率：|cff66b3ff治疗 1.65|r  |cffff6666伤害 0.60|r")
+end)
+-- Synthetic channel timestamps exercise the real event path; these are not live measurements.
+local panelPenance="效率：|cff66b3ff治疗 1.65|r  |cffff6666伤害 0.60|r"
+local measuredPenance="效率：|cff66b3ff治疗 1.98|r  |cffff6666伤害 0.71|r"
+local function startPenance(id, seconds)
+    channel={id=id,startMS=100000,endMS=100000+seconds*1000}
+    event("UNIT_SPELLCAST_CHANNEL_START","player","cast-penance",id)
+end
+
+test("penance channel start uses the full millisecond span without applying haste again",function()
+    fixture(5101,penanceCN,0,150); spellHaste=50
+    local t,n=hover(5101,"GetAction",nil,true); eq(last(t),panelPenance)
+    startPenance(5101,1.6)
+    eq(last(t),measuredPenance); eq(t:NumLines(),n+1)
+    channel=nil
+    eq(last(hover(5101,"GetAction",nil,true)),measuredPenance)
+end)
+
+test("penance calibrates without a visible tooltip and keeps ranks separate",function()
+    fixture(5102,penanceCN,0,150); fixture(5103,penanceCN,0,150)
+    GameTooltip:Hide(); startPenance(5102,1.8); eq(GameTooltip:IsShown(),false); channel=nil
+    eq(last(hover(5102,"GetAction",nil,true)),"效率：|cff66b3ff治疗 1.80|r  |cffff6666伤害 0.65|r")
+    eq(last(hover(5101,"GetAction",nil,true)),measuredPenance)
+    eq(last(hover(5103,"GetAction",nil,true)),panelPenance)
+end)
+
+test("haste changes invalidate penance calibration and the next cast refreshes the open line",function()
+    local t,n=hover(5101,"GetAction",nil,true)
+    spellHaste=25; event("UNIT_SPELL_HASTE","player")
+    eq(last(t),panelPenance); eq(t:NumLines(),n+1)
+    startPenance(5101,1.3); channel=nil
+    eq(last(t),"效率：|cff66b3ff治疗 2.33|r  |cffff6666伤害 0.84|r"); eq(t:NumLines(),n+1)
+end)
+
+test("haste round trips while hidden do not resurrect old penance measurements",function()
+    GameTooltip:Hide()
+    spellHaste=0; event("UNIT_SPELL_HASTE","player")
+    spellHaste=25; event("UNIT_SPELL_HASTE","player")
+    eq(last(hover(5101,"GetAction",nil,true)),panelPenance)
+    spellHaste=50; event("UNIT_SPELL_HASTE","player")
+    eq(last(hover(5102,"GetAction",nil,true)),panelPenance)
+end)
+
+test("unchanged haste retains calibration while unseen haste changes invalidate it on hover",function()
+    startPenance(5101,1.6); channel=nil
+    local t,n=hover(5101,"GetAction",nil,true)
+    event("UNIT_SPELL_HASTE","player"); eq(last(t),measuredPenance); eq(t:NumLines(),n+1)
+    spellHaste=25; eq(last(hover(5101,"GetAction",nil,true)),panelPenance)
+    spellHaste=50; eq(last(hover(5101,"GetAction",nil,true)),panelPenance)
+end)
+
+test("haste refresh reads new native tooltip data instead of an old channel header",function()
+    local t,n=hover(5103,"GetAction",nil,true)
+    spells[5103].freshTooltip={type=1,id=5103,lines={{type=34,leftText=penanceCN},
+        {type=0,leftText="需引导（1.7秒）"}}}
+    event("UNIT_SPELL_HASTE","player")
+    eq(last(t),"效率：|cff66b3ff治疗 1.88|r  |cffff6666伤害 0.68|r"); eq(t:NumLines(),n+1)
+    spells[5103].freshTooltip=nil
+end)
+
+test("invalid channel reads drop the old sample and recover on a later cast",function()
+    for _,sample in ipairs({{}, {fail=true}, {id=5102,startMS=100000,endMS=101000},
+        {id=5101,startMS=100000,endMS=100000}, {id=5101,startMS=100000,endMS=99999},
+        {id=5101,startMS=secret,endMS=101600}, {id=secret,startMS=100000,endMS=101600},
+        {id=5101,startMS=100000,endMS=math.huge}, {id=5101,startMS=0/0,endMS=101600}}) do
+        startPenance(5101,1.6); eq(last(hover(5101,"GetAction",nil,true)),measuredPenance)
+        channel=sample; event("UNIT_SPELLCAST_CHANNEL_START","player","cast-bad",5101)
+        eq(last(GameTooltip),panelPenance)
+    end
+    local original=UnitChannelInfo; UnitChannelInfo=nil
+    event("UNIT_SPELLCAST_CHANNEL_START","player","cast-no-api",5101)
+    eq(last(GameTooltip),panelPenance); UnitChannelInfo=original
+    startPenance(5101,1.6); channel=nil; eq(last(GameTooltip),measuredPenance)
+end)
+
+test("unknown haste can use an actual measurement but cannot reuse it after a haste event",function()
+    spellHaste=nil; event("UNIT_SPELL_HASTE","player")
+    startPenance(5101,1.6); channel=nil
+    eq(last(hover(5101,"GetAction",nil,true)),measuredPenance)
+    event("UNIT_SPELL_HASTE","player"); eq(last(GameTooltip),panelPenance)
+    spellHaste=secret; startPenance(5101,1.6); channel=nil
+    eq(last(GameTooltip),measuredPenance)
+    spellHaste=50; event("UNIT_SPELL_HASTE","player"); eq(last(GameTooltip),panelPenance)
+end)
+
+test("pushback interruption and channel stop do not turn a partial cast into full output",function()
+    startPenance(5101,1.6)
+    channel.endMS=100400
+    event("UNIT_SPELLCAST_CHANNEL_UPDATE","player","cast-penance",5101)
+    event("UNIT_SPELLCAST_INTERRUPTED","player","cast-penance",5101)
+    channel=nil; event("UNIT_SPELLCAST_CHANNEL_STOP","player","cast-penance",5101)
+    eq(last(hover(5101,"GetAction",nil,true)),measuredPenance)
+end)
+
+test("other units unknown ranks and nonpenance channels cannot calibrate penance",function()
+    local count=channelReads
+    event("UNIT_SPELLCAST_CHANNEL_START","target","cast-target",5101)
+    event("UNIT_SPELLCAST_CHANNEL_START","player","cast-secret",secret)
+    event("UNIT_SPELLCAST_CHANNEL_START","player","cast-unknown",999999)
+    eq(channelReads,count)
+    startPenance(1003,1); channel=nil
+    eq(last(hover(1003,"GetAction",nil,true)),"效率：|cffff6666伤害 2.49|r")
+    eq(last(hover(5101,"GetAction",nil,true)),measuredPenance)
+    books[5102].isPassive=true; startPenance(5102,1); channel=nil; books[5102].isPassive=false
+    eq(last(hover(5102,"GetAction",nil,true)),panelPenance)
+end)
+
+test("disabled efficiency does not query channels or keep old calibration",function()
+    assert(A.Settings.Apply(false,0.8)); local count=channelReads
+    startPenance(5101,1); channel=nil; eq(channelReads,count)
+    assert(A.Settings.Apply(true,0.8))
+    eq(last(hover(5101,"GetAction",nil,true)),panelPenance)
+end)
+
+test("calibrated penance still respects GCD weight and one line across repeated hovers",function()
+    startPenance(5101,0.7); channel=nil
+    local t,n=hover(5101,"GetAction",nil,true)
+    eq(last(t),"效率：|cff66b3ff治疗 2.88|r  |cffff6666伤害 1.04|r")
+    startPenance(5101,1.6); channel=nil
+    assert(A.Settings.Apply(true,0)); eq(last(t),"效率：|cff66b3ff治疗 2.88|r  |cffff6666伤害 1.04|r")
+    assert(A.Settings.Apply(true,1)); eq(last(t),"效率：|cff66b3ff治疗 1.80|r  |cffff6666伤害 0.65|r")
+    assert(A.Settings.Apply(true,0.8))
+    for i=1,10 do callbacks[1](t,t.data); eq(last(t),measuredPenance); eq(t:NumLines(),n+1) end
+    event("PLAYER_LOGOUT")
+    local count=0; for key in pairs(SpellEfficiencyDB) do
+        assert(key=="enabled" or key=="timeWeight" or key=="minimapAngle"); count=count+1
+    end
+    eq(count,3)
+    for _,frame in ipairs(frames) do eq(frame.scripts.OnUpdate,nil) end
+    spellHaste=0
 end)
 print("TOTAL " .. passed .. " spell-efficiency tests passed")

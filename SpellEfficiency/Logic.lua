@@ -210,7 +210,7 @@ function L.Effects(description, locale)
         local bolts = 1 + math.floor(repeats + 0.5)
         damage, healing = damage * bolts, healing * bolts
         if not L.Number(damage) or not L.Number(healing) then return nil, "unsupported" end
-        return {damage=damage, healing=healing}, nil, seconds
+        return {damage=damage, healing=healing}, nil, seconds, "penance"
     end
     local fullDuration, totals, healingRatio, previousHealing = duration(text), {}, nil, false
     -- Keep each direct/periodic component separate, so a tick interval cannot multiply a direct heal.

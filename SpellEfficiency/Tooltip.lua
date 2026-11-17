@@ -11,6 +11,15 @@ local effectStyles = {
     {"absorb", "吸收", "|cff66b3ff"},
 }
 local installed, lineIndex = false, nil
+local channelTimes = {}
+
+local function currentHaste()
+    if type(UnitSpellHaste) ~= "function" then return end
+    local ok, value = pcall(UnitSpellHaste, "player")
+    if ok and L.Readable(value) and type(value) == "number" and L.Number(value + 100) and value > -100 then
+        return value
+    end
+end
 
 local function spellBookInfo(id)
     if not C_SpellBook or not C_SpellBook.FindSpellBookSlotForSpell or not C_SpellBook.GetSpellBookItemInfo then return end
@@ -22,6 +31,20 @@ local function spellBookInfo(id)
         or not L.Number(info.skillLineIndex) or info.skillLineIndex < 2 then return end
     if info.spellID ~= id then return end
     return info
+end
+
+local function recordChannel(id)
+    if not L.Number(id) or id <= 0 then return end
+    channelTimes[id] = nil
+    local info = spellBookInfo(id)
+    if not info or info.isPassive or type(UnitChannelInfo) ~= "function" then return end
+    local _, _, _, kind = L.Effects(C_Spell.GetSpellDescription(id), GetLocale())
+    if kind ~= "penance" then return end
+    local _, _, _, startMS, endMS, _, _, channelID = UnitChannelInfo("player")
+    if not L.Number(channelID) or channelID ~= id or not L.Number(startMS)
+        or not L.Number(endMS) or endMS <= startMS then return end
+    -- The initial scheduled span already includes client modifiers. Never time an early stop.
+    channelTimes[id] = {seconds=(endMS - startMS) / 1000, haste=currentHaste()}
 end
 
 local function estimate(id, data, info)
@@ -43,8 +66,14 @@ local function estimate(id, data, info)
         end
     end
     local description = #descriptions > 0 and table.concat(descriptions, "\n") or C_Spell.GetSpellDescription(id)
-    local effects, reason, seconds = L.Effects(description, GetLocale())
+    local effects, reason, seconds, kind = L.Effects(description, GetLocale())
     if not effects then return reasons[reason] or reasons.unsupported end
+    local haste = currentHaste()
+    local measured = kind == "penance" and channelTimes[id]
+    if measured then
+        if measured.haste == haste then channelSeconds = measured.seconds
+        else channelTimes[id] = nil end
+    end
     -- Forever spell haste scales GCD within 1.0-1.5s (forever-bugs #389).
     -- Cast time is already supplied by the client; do not apply haste to it again.
     local gcdMS = 1500
@@ -53,13 +82,8 @@ local function estimate(id, data, info)
         if ok and L.Number(base) then gcdMS = base end
     end
     if gcdMS > 0 then
-        local haste
-        if type(UnitSpellHaste) == "function" then
-            local ok, value = pcall(UnitSpellHaste, "player")
-            if ok then haste = value end
-        end
         -- Until haste is readable, keep the base GCD (or the caster 1.5s default).
-        if L.Readable(haste) and type(haste) == "number" and L.Number(haste + 100) and haste > -100 then
+        if haste then
             gcdMS = math.max(math.min(gcdMS, 1000), math.min(gcdMS, 1500, gcdMS / (1 + haste / 100)))
         end
     end
@@ -108,13 +132,14 @@ local function onTooltip(tooltip, data, source)
     return true
 end
 
-function A.RefreshTooltip()
+function A.RefreshTooltip(rebuild)
+    if not A.Settings.IsEnabled() then channelTimes = {} end
     if not installed or GameTooltip:IsForbidden() or not GameTooltip:IsShown() then return end
     local info = GameTooltip:GetPrimaryTooltipInfo()
     if not info or not sources[info.getterName] or info.append or not info.tooltipData
         or info.tooltipData.type ~= Enum.TooltipDataType.Spell then return end
-    if not A.Settings.IsEnabled() then
-        -- Rebuild the native contents to remove our line without hiding the spell tooltip.
+    if not A.Settings.IsEnabled() or rebuild then
+        -- Native rebuilding re-queries the original getter, including changed channel headers.
         if lineIndex then GameTooltip:RebuildFromTooltipInfo() end
     elseif onTooltip(GameTooltip, info.tooltipData, info) then
         GameTooltip:Show()
@@ -135,12 +160,26 @@ local function install()
     TooltipDataProcessor.AddTooltipPostCall(Enum.TooltipDataType.Spell, onTooltip)
     GameTooltip:HookScript("OnTooltipCleared", function() lineIndex = nil end)
     events:RegisterUnitEvent("UNIT_SPELL_HASTE", "player")
+    if class == "PRIEST" then events:RegisterUnitEvent("UNIT_SPELLCAST_CHANNEL_START", "player") end
     installed = true
     events:UnregisterEvent("PLAYER_LOGIN"); events:UnregisterEvent("ADDON_LOADED")
 end
-events:SetScript("OnEvent", function(_, event, unit)
-    if event ~= "UNIT_SPELL_HASTE" then install(); return end
-    if unit == "player" and lineIndex then A.RefreshTooltip() end
+events:SetScript("OnEvent", function(_, event, unit, _, spellID)
+    if event == "UNIT_SPELLCAST_CHANNEL_START" then
+        if unit ~= "player" then return end
+        if not A.Settings.IsEnabled() then channelTimes = {}; return end
+        pcall(recordChannel, spellID)
+        if lineIndex then A.RefreshTooltip() end
+    elseif event == "UNIT_SPELL_HASTE" then
+        if unit ~= "player" then return end
+        local haste = currentHaste()
+        for id, measured in pairs(channelTimes) do
+            if haste == nil or measured.haste ~= haste then channelTimes[id] = nil end
+        end
+        if lineIndex then A.RefreshTooltip(true) end
+    else
+        install()
+    end
 end)
 events:RegisterEvent("PLAYER_LOGIN")
 events:RegisterEvent("ADDON_LOADED")
