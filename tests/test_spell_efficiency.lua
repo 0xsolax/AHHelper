@@ -1,4 +1,4 @@
--- Synthetic tooltip fixtures, not observations from a running client. Operator: Solazhu.
+-- Offline tooltip fixtures; screenshot-derived cases are identified below. Operator: Solazhu.
 local A, passed = {}, 0
 local function test(name, callback)
     local ok, err = pcall(callback)
@@ -926,5 +926,115 @@ test("druid haste and weight changes update one line and priest support remains"
     assert(A.Settings.Apply(true,1)); eq(last(GameTooltip),"效率：|cff66b3ff治疗 1.60|r")
     playerClass="PRIEST"; reload(nil)
     eq(last(hover(1004)),"效率：|cff66b3ff治疗 4.34|r"); eq(#callbacks,1)
+end)
+-- Chinese text and first-rank amounts supplied by the user's Forever screenshot.
+local penanceCN="向目标施放圣光能量，立即对一名敌人造成52点神圣伤害，或为一名盟友恢复144点生命值，并在接下来的2秒内每1秒重复一次效果。"
+local penanceEN="Launches a volley of holy light at the target, causing 52 Holy damage to an enemy, or 144 healing to an ally, instantly and every 1 sec for 2 sec."
+
+test("penance screenshot includes the initial bolt and two repeated bolts",function()
+    local effects,reason,seconds=L.Effects(penanceCN,"zhCN")
+    eq(reason,nil); eq(effects.healing,432); eq(effects.damage,156); eq(effects.absorb,nil); eq(seconds,2)
+end)
+
+test("English penance shares its timing across alternative healing and damage",function()
+    for _,locale in ipairs({"enUS","enGB"}) do
+        local effects,reason,seconds=L.Effects("  " .. penanceEN:gsub(", ",",\n") .. "  ",locale)
+        eq(reason,nil); eq(effects.healing,432); eq(effects.damage,156); eq(seconds,2)
+    end
+end)
+
+test("penance keeps range means formatting and current effect magnitudes",function()
+    local text=penanceCN:gsub("52","50到54"):gsub("144","|cffffffff1,000至1,400|r")
+        :gsub("施放","释放"):gsub("，","，\n")
+    local effects,reason,seconds=L.Effects(text,"zhCN")
+    eq(reason,nil); eq(effects.healing,3600); eq(effects.damage,156); eq(seconds,2)
+    effects,reason,seconds=L.Effects(penanceEN:gsub("52","50 to 54"):gsub("144","140-148"),"enUS")
+    eq(reason,nil); eq(effects.healing,432); eq(effects.damage,156); eq(seconds,2)
+end)
+
+test("initial bolt counts derive from the stated duration and interval",function()
+    local effects,reason,seconds=L.Effects(penanceCN:gsub("2秒内每1秒","4秒内每2秒"),"zhCN")
+    eq(reason,nil); eq(effects.healing,432); eq(effects.damage,156); eq(seconds,4)
+    effects,reason,seconds=L.Effects(penanceEN:gsub("every 1 sec","every 0.5 sec"),"enUS")
+    eq(reason,nil); eq(effects.healing,720); eq(effects.damage,260); eq(seconds,2)
+end)
+
+test("incomplete or ambiguous penance never becomes a partial estimate",function()
+    for _,case in ipairs({
+        {penanceCN:gsub("每1秒","每0秒"),"zhCN"},
+        {penanceCN:gsub("2秒内","0秒内"),"zhCN"},
+        {penanceCN:gsub("每1秒","每1.5秒"),"zhCN"},
+        {penanceCN:gsub("每1秒","每3秒"),"zhCN"},
+        {penanceCN:gsub("144点生命值","144%%生命值"),"zhCN"},
+        {penanceCN:gsub("52点","52万点"),"zhCN"},
+        {penanceCN:gsub("52点","52+100点"),"zhCN"},
+        {penanceCN:gsub("立即",""),"zhCN"},
+        {penanceCN:gsub("，并在接下来.*","。"),"zhCN"},
+        {penanceCN .. "并额外恢复100点生命值。","zhCN"},
+        {penanceEN:gsub("every 1 sec","every 0 sec"),"enUS"},
+        {penanceEN:gsub("for 2 sec","for 0 sec"),"enUS"},
+        {penanceEN:gsub("for 2 sec","for 2.5 sec"),"enUS"},
+        {penanceEN:gsub("144 healing","144%% healing"),"enUS"},
+        {penanceEN:gsub("52 Holy","52k Holy"),"enUS"},
+        {penanceEN:gsub("144 healing","144 + 200 healing"),"enUS"},
+        {penanceEN:gsub("instantly and ",""),"enUS"},
+        {penanceEN:gsub(", instantly.*","."),"enUS"},
+        {penanceEN .. " Heals you for 100 health.","enUS"},
+        {penanceEN:gsub("52 Holy",string.rep("9",310) .. " Holy"),"enUS"},
+    }) do
+        local effects,reason=L.Effects(case[1],case[2]); eq(effects,nil); eq(reason,"unsupported")
+    end
+end)
+
+test("penance hover shows complete blue healing and red damage on one line",function()
+    fixture(5001,penanceCN,0,150); spells[5001].name="苦修"
+    local t,n=hover(5001,"GetSpellBookItem",nil,true)
+    eq(last(t),"效率：|cff66b3ff治疗 1.65|r  |cffff6666伤害 0.60|r"); eq(t:NumLines(),n+1)
+    callbacks[1](t,t.data); eq(t:NumLines(),n+1)
+    local original=GetLocale; GetLocale=function() return "enUS" end
+    t=hover(5001,"GetAction",penanceEN,true); GetLocale=original
+    eq(last(t),"效率：|cff66b3ff治疗 1.65|r  |cffff6666伤害 0.60|r")
+end)
+
+test("penance ranks use the displayed description and their own mana costs",function()
+    fixture(5002,penanceCN:gsub("52点","100点"):gsub("144点","250点"),0,250)
+    spells[5002].name="苦修"
+    eq(last(hover(5002,"GetAction",nil,true)),"效率：|cff66b3ff治疗 1.72|r  |cffff6666伤害 0.69|r")
+    eq(queries[#queries],5002)
+    eq(last(hover(5001,"GetAction",nil,true)),"效率：|cff66b3ff治疗 1.65|r  |cffff6666伤害 0.60|r")
+    local t=hover(5002,"GetAction",penanceCN,true)
+    eq(last(t),"效率：|cff66b3ff治疗 0.99|r  |cffff6666伤害 0.36|r")
+end)
+
+test("penance uses the configured time weight for its complete channel",function()
+    local t,n=hover(5001,"GetAction",nil,true)
+    assert(A.Settings.Apply(true,0))
+    eq(last(t),"效率：|cff66b3ff治疗 2.88|r  |cffff6666伤害 1.04|r"); eq(t:NumLines(),n+1)
+    assert(A.Settings.Apply(true,1))
+    eq(last(t),"效率：|cff66b3ff治疗 1.44|r  |cffff6666伤害 0.52|r"); eq(t:NumLines(),n+1)
+    assert(A.Settings.Apply(true,0.8))
+    eq(last(t),"效率：|cff66b3ff治疗 1.65|r  |cffff6666伤害 0.60|r")
+end)
+
+test("penance timing honors client channel headers without applying haste twice",function()
+    spellHaste=nil; local t,n=hover(5001,"GetAction",nil,true)
+    eq(last(t),"效率：|cff66b3ff治疗 1.65|r  |cffff6666伤害 0.60|r")
+    spellHaste=50; event("UNIT_SPELL_HASTE","player")
+    eq(last(t),"效率：|cff66b3ff治疗 1.65|r  |cffff6666伤害 0.60|r"); eq(t:NumLines(),n+1)
+    -- Synthetic client-supplied duration: use it, while retaining the three stated bolts.
+    t.data.lines[2].leftText="需引导（1秒）"; callbacks[1](t,t.data)
+    eq(last(t),"效率：|cff66b3ff治疗 2.88|r  |cffff6666伤害 1.04|r")
+    spellHaste=0; event("UNIT_SPELL_HASTE","player")
+    eq(last(t),"效率：|cff66b3ff治疗 2.08|r  |cffff6666伤害 0.75|r")
+end)
+
+test("penance failed reads clear old values and recover on the next hover",function()
+    spells[5001].costs=nil
+    eq(last(hover(5001,"GetAction",nil,true)),"效率：耗蓝未知")
+    spells[5001].costs={{type=0,cost=0}}
+    eq(last(hover(5001,"GetAction",nil,true)),"效率：当前免耗蓝")
+    spells[5001].costs={{type=0,cost=150}}
+    eq(last(hover(5001,"GetAction",penanceCN:gsub("每1秒","每0秒"),true)),"效率：无法估算")
+    eq(last(hover(5001,"GetAction",nil,true)),"效率：|cff66b3ff治疗 1.65|r  |cffff6666伤害 0.60|r")
 end)
 print("TOTAL " .. passed .. " spell-efficiency tests passed")

@@ -182,6 +182,36 @@ function L.Effects(description, locale)
         "when hit", "when struck", "attacker", "for each", "click", "charges", "next melee", "chance"}) do
         if procText:find(word, 1, true) then return nil, "unsupported" end
     end
+    -- Penance's timing applies to both alternatives, including the immediate first bolt.
+    -- Parse the complete sentence before splitting; an unfamiliar variant must not return one bolt.
+    local volley, prefix, pattern = text:gsub("%s+", " "):gsub("^ ", ""):gsub(" $", "")
+    if locale == "zhCN" then
+        volley = volley:gsub("%s", ""):gsub("^向目标释放圣光能量", "向目标施放圣光能量"):gsub("。$", "")
+        prefix = "向目标施放圣光能量，"
+        pattern = "^" .. prefix .. "立即对一名敌人造成" .. number .. "点神圣伤害，或为一名盟友恢复"
+            .. number .. "点生命值，并在接下来的" .. number .. "秒内每" .. number .. "秒重复一次效果$"
+    else
+        prefix = "launches a volley of holy light at the target, "
+        pattern = "^" .. prefix .. "causing " .. number .. " holy damage to an enemy, or " .. number
+            .. " healing to an ally, instantly and every " .. number .. " sec for " .. number .. " sec%.?$"
+    end
+    if volley:find(prefix, 1, true) == 1 then
+        local damage, healing, seconds, period = volley:match(pattern)
+        if locale ~= "zhCN" then seconds, period = period, seconds end
+        damage, healing, seconds, period = tonumber(damage), tonumber(healing), tonumber(seconds), tonumber(period)
+        if not L.Number(damage) or damage <= 0 or not L.Number(healing) or healing <= 0
+            or not L.Number(seconds) or seconds <= 0 or not L.Number(period) or period <= 0 then
+            return nil, "unsupported"
+        end
+        local repeats = seconds / period
+        if not L.Number(repeats) or repeats < 1 or math.abs(repeats - math.floor(repeats + 0.5)) > 0.000001 then
+            return nil, "unsupported"
+        end
+        local bolts = 1 + math.floor(repeats + 0.5)
+        damage, healing = damage * bolts, healing * bolts
+        if not L.Number(damage) or not L.Number(healing) then return nil, "unsupported" end
+        return {damage=damage, healing=healing}, nil, seconds
+    end
     local fullDuration, totals, healingRatio, previousHealing = duration(text), {}, nil, false
     -- Keep each direct/periodic component separate, so a tick interval cannot multiply a direct heal.
     local clauses = text:gsub("，", ";"):gsub("。", ";"):gsub("；", ";"):gsub("并", ";")
