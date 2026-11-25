@@ -38,8 +38,8 @@ local function recordChannel(id)
     channelTimes[id] = nil
     local info = spellBookInfo(id)
     if not info or info.isPassive or type(UnitChannelInfo) ~= "function" then return end
-    local _, _, _, kind = L.Effects(C_Spell.GetSpellDescription(id), GetLocale())
-    if kind ~= "penance" then return end
+    local effects = L.Effects(C_Spell.GetSpellDescription(id), GetLocale())
+    if not effects or not effects.damage then return end
     local _, _, _, startMS, endMS, _, _, channelID = UnitChannelInfo("player")
     if not L.Number(channelID) or channelID ~= id or not L.Number(startMS)
         or not L.Number(endMS) or endMS <= startMS then return end
@@ -66,10 +66,10 @@ local function estimate(id, data, info)
         end
     end
     local description = #descriptions > 0 and table.concat(descriptions, "\n") or C_Spell.GetSpellDescription(id)
-    local effects, reason, seconds, kind = L.Effects(description, GetLocale())
+    local effects, reason, seconds = L.Effects(description, GetLocale())
     if not effects then return reasons[reason] or reasons.unsupported end
     local haste = currentHaste()
-    local measured = kind == "penance" and channelTimes[id]
+    local measured = channelled and effects.damage and channelTimes[id]
     if measured then
         if measured.haste == haste then channelSeconds = measured.seconds
         else channelTimes[id] = nil end
@@ -160,7 +160,7 @@ local function install()
     TooltipDataProcessor.AddTooltipPostCall(Enum.TooltipDataType.Spell, onTooltip)
     GameTooltip:HookScript("OnTooltipCleared", function() lineIndex = nil end)
     events:RegisterUnitEvent("UNIT_SPELL_HASTE", "player")
-    if class == "PRIEST" then events:RegisterUnitEvent("UNIT_SPELLCAST_CHANNEL_START", "player") end
+    events:RegisterUnitEvent("UNIT_SPELLCAST_CHANNEL_START", "player")
     installed = true
     events:UnregisterEvent("PLAYER_LOGIN"); events:UnregisterEvent("ADDON_LOADED")
 end

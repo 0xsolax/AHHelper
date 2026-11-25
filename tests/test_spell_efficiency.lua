@@ -47,7 +47,8 @@ UnitChannelInfo = function(unit)
     eq(unit,"player"); channelReads=channelReads+1
     if not channel then return end
     if channel.fail then error("channel not ready") end
-    return "苦修","苦修",1,channel.startMS,channel.endMS,false,false,channel.id
+    local name=spells[channel.id] and spells[channel.id].name or "引导技能"
+    return name,name,1,channel.startMS,channel.endMS,false,false,channel.id
 end
 CreateFrame = function(kind, name, parent, template)
     local f = {events={},scripts={},name=name,parent=parent,shown=true,width=0,height=0,text=""}
@@ -1141,14 +1142,14 @@ test("pushback interruption and channel stop do not turn a partial cast into ful
     eq(last(hover(5101,"GetAction",nil,true)),measuredPenance)
 end)
 
-test("other units unknown ranks and nonpenance channels cannot calibrate penance",function()
+test("other units unknown ranks and other channels cannot overwrite penance calibration",function()
     local count=channelReads
     event("UNIT_SPELLCAST_CHANNEL_START","target","cast-target",5101)
     event("UNIT_SPELLCAST_CHANNEL_START","player","cast-secret",secret)
     event("UNIT_SPELLCAST_CHANNEL_START","player","cast-unknown",999999)
     eq(channelReads,count)
     startPenance(1003,1); channel=nil
-    eq(last(hover(1003,"GetAction",nil,true)),"效率：|cffff6666伤害 2.49|r")
+    eq(last(hover(1003,"GetAction",nil,true)),"效率：|cffff6666伤害 6.00|r")
     eq(last(hover(5101,"GetAction",nil,true)),measuredPenance)
     books[5102].isPassive=true; startPenance(5102,1); channel=nil; books[5102].isPassive=false
     eq(last(hover(5102,"GetAction",nil,true)),panelPenance)
@@ -1175,6 +1176,161 @@ test("calibrated penance still respects GCD weight and one line across repeated 
         assert(key=="enabled" or key=="timeWeight" or key=="minimapAngle"); count=count+1
     end
     eq(count,3)
+    for _,frame in ipairs(frames) do eq(frame.scripts.OnUpdate,nil) end
+    spellHaste=0
+end)
+-- Mind Flay-shaped text uses synthetic amounts; live character values still come from the client.
+local mindFlayCN="以暗影能量攻击目标的灵魂，在3秒内对其造成总计600点暗影伤害，并使其移动速度降低50%。"
+local mindFlayEN="Assault the target's mind with Shadow energy, causing 600 Shadow damage over 3 sec and slowing their movement speed by 50%."
+local startChannel=startPenance
+local panelFlay="效率：|cffff6666伤害 2.49|r"
+local measuredFlay="效率：|cffff6666伤害 3.45|r"
+
+test("mind flay total damage and per tick descriptions agree without counting the slow",function()
+    for _,case in ipairs({{mindFlayCN,"zhCN"},{mindFlayEN,"enUS"},{mindFlayEN,"enGB"},
+        {"每秒造成200点暗影伤害，持续3秒。","zhCN"},
+        {"Causes 200 Shadow damage every 1 sec for 3 sec.","enUS"},
+        {"在3秒内造成500到700点暗影伤害，并使移动速度降低50%。","zhCN"}}) do
+        local amount,kind,seconds=effect(case[1],case[2])
+        eq(amount,600); eq(kind,"damage"); eq(seconds,3)
+    end
+end)
+
+test("mind flay uses actual full channel time and never applies haste twice",function()
+    fixture(6001,mindFlayCN,0,100); spells[6001].name="精神鞭挞"; spellHaste=50
+    local t,n=hover(6001,"GetAction",nil,true); eq(last(t),panelFlay)
+    startChannel(6001,2); channel=nil
+    eq(last(t),measuredFlay); eq(t:NumLines(),n+1)
+    eq(last(hover(6001,"GetSpellBookItem",nil,true)),measuredFlay)
+end)
+
+test("shorter actual channels preserve the complete stated tick count in both locales",function()
+    local original=GetLocale
+    for _,case in ipairs({{6003,"每秒造成200点暗影伤害，持续3秒。","zhCN"},
+        {6004,"Causes 200 Shadow damage every 1 sec for 3 sec.","enUS"}}) do
+        GetLocale=function() return case[3] end
+        fixture(case[1],case[2],0,100)
+        local t=hover(case[1],"GetAction",nil,true)
+        startChannel(case[1],2.4); channel=nil
+        eq(last(t),"效率：|cffff6666伤害 2.98|r")
+    end
+    GetLocale=original
+end)
+
+test("channel spell ranks retain separate costs and calibrated durations",function()
+    fixture(6002,mindFlayCN,0,200); spells[6002].name="精神鞭挞"
+    GameTooltip:Hide(); startChannel(6002,2.4); channel=nil; eq(GameTooltip:IsShown(),false)
+    eq(last(hover(6002,"GetAction",nil,true)),"效率：|cffff6666伤害 1.49|r")
+    eq(last(hover(6001,"GetAction",nil,true)),measuredFlay)
+end)
+
+test("haste changes return damage channels to panel timing until the next calibration",function()
+    local t,n=hover(6001,"GetAction",nil,true)
+    spellHaste=25; event("UNIT_SPELL_HASTE","player")
+    eq(last(t),panelFlay); eq(t:NumLines(),n+1)
+    startChannel(6001,1.8); channel=nil
+    eq(last(t),"效率：|cffff6666伤害 3.75|r"); eq(t:NumLines(),n+1)
+    event("UNIT_SPELL_HASTE","player"); eq(last(t),"效率：|cffff6666伤害 3.75|r")
+end)
+
+test("hidden damage tooltips cannot retain calibration through haste round trips",function()
+    GameTooltip:Hide()
+    spellHaste=0; event("UNIT_SPELL_HASTE","player")
+    spellHaste=25; event("UNIT_SPELL_HASTE","player")
+    eq(GameTooltip:IsShown(),false)
+    eq(last(hover(6001,"GetAction",nil,true)),panelFlay)
+    spellHaste=50; event("UNIT_SPELL_HASTE","player")
+    eq(last(hover(6002,"GetAction",nil,true)),"效率：|cffff6666伤害 1.25|r")
+end)
+
+test("a damage channel with unchanged actual timing does not invent a haste gain",function()
+    startChannel(6001,3); channel=nil; eq(last(hover(6001,"GetAction",nil,true)),panelFlay)
+    spellHaste=0; event("UNIT_SPELL_HASTE","player")
+    startChannel(6001,3); channel=nil; eq(last(GameTooltip),panelFlay)
+    spellHaste=50; event("UNIT_SPELL_HASTE","player")
+end)
+
+test("penance and other damage channel calibrations cannot replace each other",function()
+    startChannel(5101,1.6); startChannel(6001,2); channel=nil
+    eq(last(hover(5101,"GetAction",nil,true)),measuredPenance)
+    eq(last(hover(6001,"GetAction",nil,true)),measuredFlay)
+end)
+
+test("damage channel pushback and early stop never price full output as a partial cast",function()
+    startChannel(6001,2); channel.endMS=100300
+    event("UNIT_SPELLCAST_CHANNEL_UPDATE","player","cast-partial",6001)
+    event("UNIT_SPELLCAST_INTERRUPTED","player","cast-partial",6001)
+    channel=nil; event("UNIT_SPELLCAST_CHANNEL_STOP","player","cast-partial",6001)
+    eq(last(hover(6001,"GetAction",nil,true)),measuredFlay)
+end)
+
+test("bad or mismatched damage channel reads fall back then recover",function()
+    for _,sample in ipairs({{}, {fail=true}, {id=6001,startMS=100000,endMS=100000},
+        {id=6002,startMS=100000,endMS=102000}, {id=6001,startMS=secret,endMS=102000}}) do
+        startChannel(6001,2); channel=sample
+        event("UNIT_SPELLCAST_CHANNEL_START","player","cast-bad",6001)
+        eq(last(GameTooltip),panelFlay)
+    end
+    startChannel(6001,2); channel=nil; eq(last(GameTooltip),measuredFlay)
+end)
+
+test("unknown haste can use raw damage channel timing and later readiness invalidates it",function()
+    spellHaste=nil; event("UNIT_SPELL_HASTE","player")
+    startChannel(6001,2); channel=nil; eq(last(GameTooltip),measuredFlay)
+    spellHaste=50; event("UNIT_SPELL_HASTE","player"); eq(last(GameTooltip),panelFlay)
+    startChannel(6001,2); channel=nil; eq(last(GameTooltip),measuredFlay)
+end)
+
+test("actual timing cannot supply a missing tick count or bypass mana validation",function()
+    fixture(6005,"每秒造成200点暗影伤害。",0,100)
+    local t=hover(6005,"GetAction",nil,true); eq(last(t),"效率：无法估算")
+    startChannel(6005,2); channel=nil; eq(last(t),"效率：无法估算")
+    for _,case in ipairs({{{type=0,cost=0}},{{type=3,cost=40}},{{type=0,cost=100},{type=1,cost=10}}}) do
+        spells[6001].costs=case; t=hover(6001,"GetAction",nil,true)
+        eq(last(t),case[1].cost==0 and "效率：当前免耗蓝" or "效率：不适用")
+    end
+    spells[6001].costs=nil; eq(last(hover(6001,"GetAction",nil,true)),"效率：耗蓝未知")
+    spells[6001].costs={{type=0,cost=100}}; eq(last(hover(6001,"GetAction",nil,true)),measuredFlay)
+end)
+
+test("pure healing channels and nonchannel periodic damage keep their original timing",function()
+    fixture(6006,"在3秒内恢复600点生命值。",0,100)
+    startChannel(6006,1); channel=nil
+    eq(last(hover(6006,"GetAction",nil,true)),"效率：|cff66b3ff治疗 2.49|r")
+    -- A cached channel must not override an instant tooltip that has a periodic effect.
+    eq(last(hover(6001,"GetAction","在12秒内造成600点暗影伤害。")),"效率：|cffff6666伤害 6.00|r")
+    eq(last(hover(6001,"GetAction",nil,true)),measuredFlay)
+end)
+
+test("druid login also calibrates damaging channels per target while keeping healing unchanged",function()
+    playerClass="DRUID"; reload(nil)
+    local t=hover(4113,"GetAction",nil,true)
+    startChannel(4113,6); channel=nil
+    eq(last(t),"效率：|cffff6666伤害 0.72|r")
+    startChannel(4112,4); channel=nil
+    eq(last(hover(4112,"GetAction",nil,true)),"效率：|cff66b3ff治疗 0.76|r")
+    playerClass="PRIEST"; reload(nil)
+end)
+
+test("damage channel calibration respects GCD and user weights",function()
+    startChannel(6001,0.7); channel=nil
+    local t,n=hover(6001,"GetAction",nil,true)
+    eq(last(t),"效率：|cffff6666伤害 6.00|r")
+    startChannel(6001,2); channel=nil
+    assert(A.Settings.Apply(true,0)); eq(last(t),"效率：|cffff6666伤害 6.00|r")
+    assert(A.Settings.Apply(true,1)); eq(last(t),"效率：|cffff6666伤害 3.00|r")
+    assert(A.Settings.Apply(true,0.8)); eq(last(t),measuredFlay)
+    for i=1,10 do callbacks[1](t,t.data); eq(t:NumLines(),n+1); eq(last(t),measuredFlay) end
+end)
+
+test("damage channel samples add no saved fields and are cleared on reload",function()
+    event("PLAYER_LOGOUT")
+    local saved=SpellEfficiencyDB; local count=0
+    for key in pairs(saved) do
+        assert(key=="enabled" or key=="timeWeight" or key=="minimapAngle"); count=count+1
+    end
+    eq(count,3); reload(saved,true)
+    eq(last(hover(6001,"GetAction",nil,true)),panelFlay)
     for _,frame in ipairs(frames) do eq(frame.scripts.OnUpdate,nil) end
     spellHaste=0
 end)
