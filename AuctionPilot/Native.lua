@@ -32,7 +32,12 @@ end
 
 -- Read only the native profession selection; never craft or change its filters.
 function N.ReadRecipe()
-    local form = ProfessionsFrame and ProfessionsFrame.CraftingPage and ProfessionsFrame.CraftingPage.SchematicForm
+    if ProfessionsFrame and ProfessionsFrame.IsShown and not ProfessionsFrame:IsShown() then
+        return nil, "请先打开专业窗口并选择一个配方。"
+    end
+    local page = ProfessionsFrame and ProfessionsFrame.CraftingPage
+    if page and page.IsVisible and not page:IsVisible() then return nil, "请切回专业制作页面并选择配方。" end
+    local form = page and page.SchematicForm
     if not form or not form.GetRecipeInfo then return nil, "请先打开专业窗口并选择一个配方，再点击读取。" end
     if not C_TradeSkillUI or not C_TradeSkillUI.GetRecipeSchematic then return nil, "当前客户端没有可用的配方读取接口。" end
     local ok, info, schematic = pcall(function()
@@ -78,6 +83,25 @@ function N.ReadRecipe()
     local valid, err = L.Validate(draft)
     if not valid then return nil, err end
     return draft
+end
+
+function N.InstallRecipeButton()
+    if not ProfessionsFrame or not ProfessionsFrame.HookScript or not A.UI.scanFrame then return end
+    if not N.recipeButton then
+        N.recipeButton = A.Widgets.Button(ProfessionsFrame, "扫描利润", 116, 24, function()
+            local ok, err = A.UI.ScanCurrentRecipe()
+            if not ok then A.Message(err) end
+        end)
+    end
+    N.recipeButton:SetParent(ProfessionsFrame)
+    N.recipeButton:ClearAllPoints()
+    N.recipeButton:SetPoint("TOPRIGHT", ProfessionsFrame, "TOPRIGHT", -44, -6)
+    if not ProfessionsFrame.auctionPilotScanHooked then
+        ProfessionsFrame:HookScript("OnHide", function()
+            if A.Market.batch and A.Market.batch.scan then A.Market.Pause(); A.RefreshUI() end
+        end)
+        ProfessionsFrame.auctionPilotScanHooked = true
+    end
 end
 
 function N.Attach()
@@ -249,6 +273,10 @@ local function finishPost(pending)
 end
 
 function N.OnEvent(event, itemID)
+    if event == "TRADE_SKILL_SHOW" or event == "ADDON_LOADED" then N.InstallRecipeButton() end
+    if event == "TRADE_SKILL_CLOSE" and A.Market.batch and A.Market.batch.scan then
+        A.Market.Pause(); A.RefreshUI()
+    end
     if event == "MERCHANT_SHOW" or (event == "MERCHANT_UPDATE" and MerchantFrame and MerchantFrame:IsShown()) then
         N.RecordMerchantPrices()
         return

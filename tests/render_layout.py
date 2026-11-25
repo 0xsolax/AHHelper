@@ -48,12 +48,12 @@ A.UI.quantity:SetText("20")
 MOCK.addon = A
 ''')
 
-def render(path, native=False, menu=False):
+def render(path, native=False, menu=False, root=None):
     frames = list(lua.globals().MOCK.frames.values())
     by_id = {int(f.index): f for f in frames}
     bounds = {}
     scale = 1.5
-    root = lua.globals().AuctionHouseFrame if native else lua.globals().MOCK.addon.UI.frame
+    root = root or (lua.globals().AuctionHouseFrame if native else lua.globals().MOCK.addon.UI.frame)
     root_id = int(root.index)
     anchors = {"TOPLEFT": (0, 0), "TOP": (.5, 0), "TOPRIGHT": (1, 0), "LEFT": (0, .5),
                "CENTER": (.5, .5), "RIGHT": (1, .5), "BOTTOMLEFT": (0, 1), "BOTTOM": (.5, 1), "BOTTOMRIGHT": (1, 1)}
@@ -269,3 +269,52 @@ render(ROOT / ".tools" / "layout-checks" / "retry-long-name.png", native=True)
 lua.execute('MOCK.addon.Market.Pause()')
 lua.execute('MOCK.addon.DeleteProduct(1); MOCK.addon.DeleteProduct(2); MOCK.addon.open=true; MOCK.addon.Native.ShowMonitor(); MOCK.flush()')
 render(ROOT / ".tools" / "layout-checks" / "empty.png", native=True)
+lua.execute('''
+local A = MOCK.addon
+A.Market.Pause(); A.Market.draining=nil; A.Market.discardUntil={}; A.Market.nextSend=0
+A.UI.ShowRecipeScans()
+for id, itemID in pairs({[900]=1,[901]=4,[902]=5}) do
+    local draft = {itemID=itemID,recipeName=A.ItemInfo(itemID).."的专业生产配方 #"..id,
+        sourceRecipeID=id,sourceOutputMin=1,sourceOutputMax=1,output=1,fee=5,extra=0,
+        materials={{itemID=2,quantity=2,source="market"},{itemID=3,quantity=1,source="fixed",price=200}}}
+    A.FinishRecipeScan({scan={draft=draft,vendorPrices={},quotes={
+        [itemID]=A.Logic.Snapshot({{price=itemID==1 and 12000 or 8000,quantity=100}},MOCK.time,true),
+        [2]=A.Logic.Snapshot({{price=4200,quantity=100}},MOCK.time,true)}}})
+end
+A.UI.scanSelected=900; A.RefreshUI()
+''')
+scan_frame = lua.globals().MOCK.addon.UI.scanFrame
+render(ROOT / "design" / "offline-profession-scan.png", root=scan_frame)
+lua.execute('''
+MOCK.addon.UI.scanFrame:Hide(); MOCK.addon.open=false; MOCK.time=MOCK.time+130
+MOCK.addon.UI.ShowRecipeScans()
+''')
+render(ROOT / ".tools" / "layout-checks" / "scan-reopened.png", root=scan_frame)
+lua.execute('''
+local A = MOCK.addon
+A.scanResults[900].refreshError="查询超时，请刷新重试"; A.RefreshUI()
+''')
+render(ROOT / ".tools" / "layout-checks" / "scan-failed.png", root=scan_frame)
+lua.execute('''
+local A = MOCK.addon
+local draft = A.Logic.Copy(A.scanResults[900].draft)
+draft.recipeName="用于检查长名称与极大金额显示的专业生产配方以及其完整名称"
+draft.materials[1].quantity=100000; draft.output=100000
+A.FinishRecipeScan({scan={draft=draft,vendorPrices={},quotes={
+    [1]=A.Logic.Snapshot({{price=80000000000,quantity=100}},MOCK.time,true),
+    [2]=A.Logic.Snapshot({{price=10000000000,quantity=100000}},MOCK.time,true)}}})
+A.UI.scanSelected=900; A.RefreshUI()
+''')
+render(ROOT / ".tools" / "layout-checks" / "scan-large-values.png", root=scan_frame)
+lua.execute('''
+UIParent:SetSize(1024,768)
+MOCK.addon.UI.scanFrame:Hide(); MOCK.addon.UI.ShowRecipeScans()
+''')
+render(ROOT / ".tools" / "layout-checks" / "scan-small-screen.png", root=scan_frame)
+lua.execute('''
+local A = MOCK.addon
+A.open=true; A.scanResults={}; A.UI.scanSelected=nil
+for _, row in pairs(A.UI.scanRows) do row:Hide() end
+A.RefreshUI()
+''')
+render(ROOT / ".tools" / "layout-checks" / "scan-empty.png", root=scan_frame)

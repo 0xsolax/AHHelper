@@ -1,7 +1,8 @@
 local addonName, A = ...
 A.name = addonName
-A.version = "0.8.1-test"
+A.version = "0.8.2-profession-test"
 A.quotes, A.alerts, A.noticeAt = {}, {}, {}
+A.scanResults = {}
 A.ttl = 120
 A.open = false
 
@@ -189,6 +190,83 @@ function A.RecipeNote(recipe)
     return note
 end
 
+function A.ReadRecipeScan()
+    local draft, err = A.Native.ReadRecipe()
+    if not draft then return nil, err end
+    for _, product in ipairs(A.profile.products) do
+        if product.itemID == draft.itemID then
+            draft.fee, draft.alert = product.fee, product.alert
+            for _, recipe in ipairs(product.recipes) do
+                if recipe.sourceRecipeID == draft.sourceRecipeID then
+                    draft.extra = recipe.extra
+                    for _, material in ipairs(draft.materials) do
+                        for _, saved in ipairs(recipe.materials) do
+                            if saved.itemID == material.itemID then
+                                material.source, material.price = saved.source, saved.price
+                            end
+                        end
+                    end
+                    break
+                end
+            end
+            break
+        end
+    end
+    return draft
+end
+
+-- These snapshots belong to this Lua session, never to AuctionPilotDB.
+function A.FinishRecipeScan(batch, reason)
+    local scan = batch and batch.scan
+    if not scan or scan.done then return end
+    scan.done = true
+    local id = scan.draft.sourceRecipeID
+    reason = reason or scan.error
+    local previous = A.scanResults[id]
+    if reason and previous then
+        previous.refreshError, previous.historical = reason, true
+        return
+    end
+    local estimate = reason and {error = reason, materials = {}}
+        or A.Logic.Estimate(scan.draft, scan.quotes, A.Now(), math.huge, nil, nil, scan.vendorPrices, true)
+    local at
+    for _, quote in pairs(scan.quotes) do at = at and math.min(at, quote.at) or quote.at end
+    A.scanResults[id] = { draft = A.Logic.Copy(scan.draft), estimate = estimate,
+        quotes = A.Logic.Copy(scan.quotes), at = not reason and at or nil,
+        seenAt = not reason and at and GetServerTime() - math.floor(A.Now() - at) or nil,
+        refreshError = reason }
+end
+
+function A.AddRecipeScan(id)
+    local record = A.scanResults[id]
+    if not record then return nil, "请先扫描一个配方。" end
+    local draft = A.Logic.Copy(record.draft)
+    for _, product in ipairs(A.profile.products) do
+        if product.itemID == draft.itemID then
+            for _, recipe in ipairs(product.recipes) do
+                if recipe.sourceRecipeID == draft.sourceRecipeID then
+                    A.Select(product.id, recipe.id)
+                    return true
+                end
+            end
+            draft.id, draft.fee, draft.alert = product.id, product.fee, product.alert
+            break
+        end
+    end
+    local ok, err = A.SaveProduct(draft)
+    if not ok then return nil, err end
+    -- Preserve sample times; joining the watchlist is not another market observation.
+    for itemID, quote in pairs(record.quotes) do
+        local old = A.quotes[itemID]
+        if not old or not old.complete or old.at < quote.at then
+            A.quotes[itemID] = A.Logic.Copy(quote)
+            A.quotes[itemID].historical = not A.open or record.historical or record.refreshError ~= nil
+        end
+    end
+    A.RefreshUI()
+    return true
+end
+
 function A.AlertText(alert)
     if not alert then return "等待行情更新" end
     if alert.kind == "undercut" then return "有更低价：" .. A.Logic.Money(alert.price) end
@@ -245,6 +323,7 @@ function A.Initialize()
     pruneQuotes(A.PruneVendorPrices())
     A.History.Initialize()
     A.UI.Build()
+    A.Native.InstallRecipeButton()
     A.Widgets.InstallItemLinks()
     A.Market.StartTicker()
 end
@@ -258,7 +337,8 @@ for _, event in ipairs({ "ADDON_LOADED", "PLAYER_LOGIN", "AUCTION_HOUSE_SHOW", "
     "ITEM_SEARCH_RESULTS_UPDATED", "ITEM_SEARCH_RESULTS_ADDED", "BAG_UPDATE_DELAYED",
     "GET_ITEM_INFO_RECEIVED", "ITEM_DATA_LOAD_RESULT", "AUCTION_HOUSE_AUCTION_CREATED",
     "AUCTION_HOUSE_THROTTLED_SYSTEM_READY", "AUCTION_HOUSE_SHOW_ERROR",
-    "PLAYER_MONEY", "PLAYER_REGEN_DISABLED", "PLAYER_REGEN_ENABLED", "MERCHANT_SHOW", "MERCHANT_UPDATE" }) do
+    "PLAYER_MONEY", "PLAYER_REGEN_DISABLED", "PLAYER_REGEN_ENABLED", "MERCHANT_SHOW", "MERCHANT_UPDATE",
+    "TRADE_SKILL_SHOW", "TRADE_SKILL_CLOSE" }) do
     events:RegisterEvent(event)
 end
 events:SetScript("OnEvent", function(_, event, ...)
@@ -275,11 +355,13 @@ events:SetScript("OnEvent", function(_, event, ...)
     elseif event == "AUCTION_HOUSE_CLOSED" then
         A.open = false
         for _, quote in pairs(A.quotes) do quote.historical = true end
+        for _, record in pairs(A.scanResults) do record.historical = true end
         A.History.OnEvent(event)
         A.Market.auto = false
         A.Native.OnEvent(event)
         A.Market.Pause()
         if A.UI and A.UI.frame then A.UI.frame:Hide() end
+        A.RefreshUI()
     elseif A.profile then
         A.Native.OnEvent(event, ...)
         A.History.OnEvent(event, ...)
