@@ -1,8 +1,7 @@
 local addonName, A = ...
 A.name = addonName
-A.version = "0.7.0-test"
+A.version = "0.8.0-test"
 A.quotes, A.alerts, A.noticeAt = {}, {}, {}
-A.activity = {}
 A.ttl = 120
 A.open = false
 
@@ -41,18 +40,18 @@ end
 
 -- Keep the merchant cache bounded by the saved watchlist, including alternate recipes.
 function A.PruneVendorPrices()
-    local tracked = {}
-    for _, product in ipairs(A.profile.products) do
-        tracked[product.itemID] = true
-        for _, recipe in ipairs(product.recipes) do
-            for _, material in ipairs(recipe.materials) do tracked[material.itemID] = true end
-        end
-    end
+    local tracked = A.Logic.TrackedItems(A.profile.products)
     if type(A.profile.vendorPrices) ~= "table" then A.profile.vendorPrices = {} end
     for id in pairs(A.profile.vendorPrices) do
         if not tracked[id] then A.profile.vendorPrices[id] = nil end
     end
     return tracked
+end
+
+local function pruneQuotes(tracked)
+    for itemID in pairs(A.quotes) do
+        if not tracked[itemID] then A.quotes[itemID] = nil end
+    end
 end
 
 function A.Select(id, recipeID)
@@ -110,7 +109,7 @@ function A.SaveProduct(draft)
         table.insert(A.profile.products, product)
     end
     A.alerts[product.itemID] = nil
-    A.PruneVendorPrices()
+    pruneQuotes(A.PruneVendorPrices())
     A.Select(product.id, recipe.id)
     return true
 end
@@ -123,7 +122,7 @@ function A.DeleteRecipe(productID, recipeID)
         if recipe.id == recipeID then
             table.remove(product.recipes, i)
             if product.activeRecipeID == recipeID then product.activeRecipeID = product.recipes[1].id end
-            A.PruneVendorPrices()
+            pruneQuotes(A.PruneVendorPrices())
             A.RefreshUI()
             return true
         end
@@ -139,11 +138,10 @@ function A.DeleteProduct(id)
         if other.id == product.id then table.remove(A.profile.products, i); break end
     end
     A.alerts[product.itemID] = nil
-    A.activity[product.itemID] = nil
     if A.profile.selectedID == id then
         A.profile.selectedID = A.profile.products[1] and A.profile.products[1].id or nil
     end
-    A.PruneVendorPrices()
+    pruneQuotes(A.PruneVendorPrices())
     A.RefreshUI()
 end
 
@@ -156,17 +154,21 @@ end
 function A.EstimateInput(input)
     -- A manual watchlist retains the last complete snapshot, visibly marked by age.
     local vendorPrices = A.profile and A.profile.vendorPrices
-    local result = A.Logic.Estimate(input, A.quotes, A.Now(), math.huge, nil, nil, vendorPrices)
-    local age = 0
+    local result = A.Logic.Estimate(input, A.quotes, A.Now(), math.huge, nil, nil, vendorPrices, true)
+    local age, historical, refreshError = 0, not A.open, nil
     local function include(id)
         local quote = A.quotes[id]
-        if quote and quote.complete and not quote.error then age = math.max(age, A.Now() - quote.at) end
+        if quote and quote.complete and not quote.error then
+            age = math.max(age, A.Now() - quote.at)
+            historical = historical or quote.historical
+            refreshError = refreshError or quote.refreshError
+        end
     end
     if input.itemID then include(input.itemID) end
     for _, material in ipairs(input.materials or {}) do
         if A.Logic.UsesMarketPrice(material, vendorPrices) then include(material.itemID) end
     end
-    result.age, result.stale = age, age > A.ttl
+    result.age, result.stale, result.refreshError = age, historical or age > A.ttl, refreshError
     return result
 end
 
@@ -193,39 +195,9 @@ function A.AlertText(alert)
     return "同价货量增加 " .. alert.increase .. " 件，可能被超过"
 end
 
-function A.BreakActivity(itemID, reason)
-    for id, state in pairs(A.activity) do
-        if not itemID or id == itemID then
-            state.previous, state.reference, state.referenceAt = nil, nil, nil
-            state.status = reason or "已暂停"
-        end
-    end
-end
-
-local function recordActivity(itemID, quote)
-    if not quote.complete or quote.error then A.BreakActivity(itemID, "查询失败"); return end
-    local state = A.activity[itemID] or {}
-    A.activity[itemID] = state
-    local previous, minimum = state.previous, quote.levels[1] and quote.levels[1].price
-    -- Repeated events for a single observation do not create an extra sample.
-    if previous and quote.at <= previous.at then return end
-    if not previous or not state.reference or quote.at - previous.at > A.ttl then
-        state.result = nil
-        state.reference, state.referenceAt = minimum, quote.at
-        state.status = minimum and "采样中" or "无挂单"
-    else
-        state.result = A.Logic.Activity(previous, quote, state.reference)
-        state.status = nil
-        -- Finish the old range first; the new reference applies only to the next pair.
-        if quote.at - state.referenceAt >= 600 or (minimum and minimum > state.reference) then
-            state.reference, state.referenceAt = minimum, quote.at
-        end
-    end
-    state.previous = quote
-end
-
 function A.AcceptQuote(itemID, quote)
     A.History.AcceptQuote(itemID, quote)
+    if not A.Logic.TrackedItems(A.profile.products)[itemID] then A.RefreshUI(); return end
     local previous = A.quotes[itemID]
     A.quotes[itemID] = quote
     local product
@@ -233,7 +205,6 @@ function A.AcceptQuote(itemID, quote)
         if entry.itemID == itemID then product = entry; break end
     end
     if product then
-        recordActivity(itemID, quote)
         local alert = A.Logic.Competition(A.Logic.Fresh(previous, A.Now(), A.ttl) and previous or nil, quote)
         local last = A.alerts[itemID]
         if alert then
@@ -271,7 +242,7 @@ function A.Initialize()
         AuctionPilotDB.profiles[key] = profile
     end
     A.profile = profile
-    A.PruneVendorPrices()
+    pruneQuotes(A.PruneVendorPrices())
     A.History.Initialize()
     A.UI.Build()
     A.Widgets.InstallItemLinks()
@@ -281,6 +252,8 @@ end
 local events = CreateFrame("Frame")
 A.events = events
 for _, event in ipairs({ "ADDON_LOADED", "PLAYER_LOGIN", "AUCTION_HOUSE_SHOW", "AUCTION_HOUSE_CLOSED",
+    "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED", "AUCTION_HOUSE_BROWSE_RESULTS_ADDED",
+    "AUCTION_HOUSE_BROWSE_FAILURE", "ITEM_KEY_ITEM_INFO_RECEIVED",
     "COMMODITY_SEARCH_RESULTS_UPDATED", "COMMODITY_SEARCH_RESULTS_ADDED",
     "ITEM_SEARCH_RESULTS_UPDATED", "ITEM_SEARCH_RESULTS_ADDED", "BAG_UPDATE_DELAYED",
     "GET_ITEM_INFO_RECEIVED", "ITEM_DATA_LOAD_RESULT", "AUCTION_HOUSE_AUCTION_CREATED",
@@ -294,14 +267,16 @@ events:SetScript("OnEvent", function(_, event, ...)
     elseif event == "AUCTION_HOUSE_SHOW" then
         A.Initialize()
         if not A.profile then return end
-        A.open, A.quotes, A.alerts, A.noticeAt, A.activity = true, {}, {}, {}, {}
+        A.open, A.alerts, A.noticeAt = true, {}, {}
         A.Market.auto = false
         A.Native.OnEvent(event)
         A.Market.Pause()
         C_Timer.After(0, function() if A.open then A.Native.Attach(); A.RefreshUI() end end)
     elseif event == "AUCTION_HOUSE_CLOSED" then
         A.open = false
-        A.Market.auto, A.activity = false, {}
+        for _, quote in pairs(A.quotes) do quote.historical = true end
+        A.History.OnEvent(event)
+        A.Market.auto = false
         A.Native.OnEvent(event)
         A.Market.Pause()
         if A.UI and A.UI.frame then A.UI.frame:Hide() end

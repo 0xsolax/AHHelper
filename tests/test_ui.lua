@@ -107,13 +107,19 @@ test("editor has removable rows and requires at least one material", function()
     button("保存配方"):Click(); assert(A.Editor.error:GetText() ~= "")
     button("取消"):Click(); eq(#A.SelectedRecipe().materials, 2)
 end)
-test("closing AH retains configuration but clears all query work", function()
+test("reopening AH retains the last estimate as historical without querying or enabling live prices", function()
+    local sale, material = A.quotes[1], A.quotes[2]
+    local before = A.Estimate(A.Selected())
     eq(#MOCK.queries,0)
     A.UI.refresh:Click(); eq(table.concat(A.Market.queue,","),"1,2")
     A.Market.Tick(); eq(#MOCK.queries,1); eq(MOCK.queries[1],1)
     event("AUCTION_HOUSE_CLOSED"); eq(A.open, false); eq(#A.profile.products, 1)
     eq(A.UI.frame:IsShown(), false); eq(#A.Market.queue, 0)
-    event("AUCTION_HOUSE_SHOW"); MOCK.flush(); eq(next(A.quotes), nil)
+    event("AUCTION_HOUSE_SHOW"); MOCK.flush(); A.Native.ShowMonitor(); MOCK.flush()
+    eq(A.quotes[1],sale); eq(A.quotes[2],material)
+    eq(A.Estimate(A.Selected()).roi,before.roi); eq(A.Estimate(A.Selected()).stale,true)
+    eq(A.Logic.Fresh(sale,MOCK.time,A.ttl),false); eq(A.UI.usePrice:IsEnabled(),false)
+    assert(A.UI.profit:GetText():find("历史利润")); eq(#MOCK.queries,1)
 end)
 test("one product row shows the selected recipe and menu switches independent estimates", function()
     A.Native.ShowMonitor(); MOCK.flush()
@@ -423,67 +429,29 @@ end)
 
 local function observe(at, rows, complete)
     MOCK.time = at
+    MOCK.serverTime = 1794450000 + at
     A.AcceptQuote(1,A.Logic.Snapshot(rows,at,complete ~= false))
-    return A.activity[1]
+    return A.quotes[1]
 end
 local function stock(price, quantity) return {{price=price,quantity=quantity}} end
 
-test("manual product snapshots feed the activity column without refreshing material age", function()
-    assert(A.SaveProduct({itemID=1,recipeName="波动测试",output=1,fee=5,extra=0,
+test("manual prices show their collection timestamp without refreshing material age", function()
+    assert(A.SaveProduct({itemID=1,recipeName="价格记录测试",output=1,fee=5,extra=0,
         materials={{itemID=2,quantity=1,source="market"}}}))
     event("AUCTION_HOUSE_SHOW"); MOCK.flush(); A.Native.ShowMonitor(); MOCK.flush()
     eq(A.Market.auto,false); eq(A.UI.auto:GetText(),"自动刷新：关")
+    local history = A.profile.priceHistory; local before = history.next
     MOCK.time = 1000; A.AcceptQuote(2,A.Logic.Snapshot(stock(500,100),MOCK.time,true))
-    eq(A.activity[2],nil)
-    local state = observe(1000,stock(1150,100)); eq(state.status,"采样中"); eq(state.result,nil)
-    state = observe(1030,{{price=1145,quantity=50},{price=1150,quantity=50},{price=1200,quantity=999}})
-    eq(state.reference,1150); eq(state.result.increase,50); eq(state.result.decrease,50); eq(state.result.rate,100)
+    eq(history.next,before)
+    observe(1000,stock(1150,100))
+    local q = observe(1030,{{price=1145,quantity=50},{price=1150,quantity=50},{price=1200,quantity=999}})
+    eq(history.next,before+2); eq(history.samples[before+1][3],1145)
     local row = A.UI.productRows[A.Selected().id]
-    assert(row.activity:GetText():find("100.0%%")); assert(row.help:find("采样间隔 30.0 秒",1,true))
-    assert(row.help:find("不能视为实际销量",1,true)); eq(A.quotes[2].at,1000)
+    eq(row.activity,nil); eq(row.priceTime:GetText(),date("%m-%d %H:%M",q.seenAt))
+    assert(row.help:find(date("%Y-%m-%d %H:%M:%S",q.seenAt),1,true))
+    assert(not row.help:find("波动",1,true)); eq(A.quotes[2].at,1000)
     observe(1060,stock(1145,100)); observe(1090,stock(1145,100)); observe(1121,stock(1145,100))
     eq(A.Estimate(A.Selected()).stale,true); eq(A.quotes[2].at,1000)
-end)
-
-test("rising minimum finishes the old scope before rebasing the next comparison", function()
-    A.activity = {}; observe(2000,stock(1150,100))
-    local state = observe(2030,stock(1160,80))
-    eq(state.result.reference,1150); eq(state.result.decrease,100); eq(state.result.increase,0)
-    eq(state.result.rate,200); eq(state.reference,1160)
-    state = observe(2060,stock(1160,60))
-    eq(state.result.reference,1160); eq(state.result.decrease,20); eq(state.result.previousQuantity,80)
-end)
-
-test("ten-minute reference expiry never compares different ranges", function()
-    A.activity = {}; observe(3000,stock(1150,100))
-    for at = 3100,3600,100 do
-        observe(at,{{price=1100,quantity=60},{price=1130,quantity=40}})
-    end
-    local state = A.activity[1]
-    eq(state.result.reference,1150); eq(state.result.rate,0); eq(state.reference,1100)
-    state = observe(3630,{{price=1100,quantity=50},{price=1130,quantity=900}})
-    eq(state.result.reference,1100); eq(state.result.previousQuantity,60)
-    eq(state.result.decrease,10); eq(state.result.increase,0)
-end)
-
-test("gaps failures and repeated events cannot fabricate zero or fresh movement", function()
-    A.activity = {}; observe(4000,stock(100,100)); observe(4030,stock(100,80))
-    local state = A.activity[1]; local result = state.result
-    observe(4030,stock(100,1)); eq(state.result,result); eq(state.previous.levels[1].quantity,80)
-    observe(4151,stock(100,20)); eq(state.result,nil); eq(state.status,"采样中")
-    observe(4181,stock(100,10)); eq(state.result.decrease,10)
-    observe(4190,{},false); eq(state.status,"查询失败"); eq(state.previous,nil)
-    eq(state.result.decrease,10)
-    observe(4200,stock(100,40)); eq(state.result,nil); eq(state.status,"采样中")
-end)
-
-test("empty books and first later listings establish honest baselines", function()
-    A.activity = {}; local state = observe(5000,{})
-    eq(state.status,"无挂单"); eq(state.result,nil)
-    observe(5030,stock(100,20)); eq(state.status,"采样中"); eq(state.result,nil)
-    observe(5060,{}); eq(state.result.decrease,20); eq(state.result.rate,200)
-    observe(5090,{}); eq(state.result.rate,nil); eq(state.result.decrease,0)
-    observe(5120,stock(100,40)); eq(state.result.increase,40); eq(state.result.rate,200)
 end)
 
 local book = stock(100,40)
@@ -496,40 +464,42 @@ C_AuctionHouse.GetCommoditySearchResultInfo = function(_, index)
 end
 C_AuctionHouse.RequestMoreCommoditySearchResults = function() return false end
 
-test("auto pauses for editor and native tabs then starts a fresh baseline on return", function()
+test("auto pauses for editor and native tabs and resumes price recording on return", function()
     local M = A.Market
+    local history = A.profile.priceHistory; local before = history.next
     MOCK.time = 5200; A.UI.auto:Click(); eq(M.auto,true); eq(M.active.itemID,1)
-    M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1); eq(A.activity[1].result,nil)
+    M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1); eq(history.next,before+1)
     MOCK.time = 5230; M.Tick(); book = stock(100,20); M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1)
-    eq(A.activity[1].result.decrease,20)
+    eq(history.next,before+2)
     A.Editor.Open(A.Selected()); eq(M.active,nil); eq(#M.queue,0); eq(M.auto,true)
-    eq(A.activity[1].previous,nil); local count = #MOCK.queries
+    local count = #MOCK.queries
     MOCK.time = 5300; M.Tick(); eq(#MOCK.queries,count)
     eq(M.RequestItem(2),nil)
     A.Editor.Close(); M.Tick(); eq(M.active.itemID,1)
     book = stock(100,5); M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1)
-    eq(A.activity[1].result,nil); eq(A.activity[1].status,"采样中")
-    A.Native.Navigate("buy"); eq(M.auto,true); eq(A.activity[1].previous,nil)
+    eq(history.next,before+3)
+    A.Native.Navigate("buy"); eq(M.auto,true)
     MOCK.time = 5400; M.Tick(); eq(M.active,nil)
     A.Native.ShowMonitor(); MOCK.flush(); M.Tick(); eq(M.active.itemID,1)
-    M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1); eq(A.activity[1].result,nil)
+    M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1); eq(history.next,before+4)
     eq(MOCK.postCalls,0); eq(MOCK.purchaseCalls or 0,0)
     M.SetAuto(false)
 end)
 
-test("incomplete pages retain last movement and timeout breaks the next pair", function()
+test("incomplete pages and timeout retain the last recorded price and timestamp", function()
     local M = A.Market
-    A.activity = {}; observe(6000,stock(100,100)); observe(6030,stock(100,80))
-    local result = A.activity[1].result
+    observe(6000,stock(100,100)); observe(6030,stock(100,80))
+    local history = A.profile.priceHistory; local before = history.next
+    local saved = A.profile.lastSeenPrices[1]
     full = false; MOCK.time = 6060; assert(M.RequestItem(1)); M.Tick()
     M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1)
-    eq(A.activity[1].result,result); eq(A.quotes[1].at,6030)
-    MOCK.time = 6086; M.Tick(); eq(M.active,nil); eq(A.activity[1].previous,nil)
-    eq(A.activity[1].result,result); eq(A.activity[1].status,"查询失败")
-    full = true; observe(6100,stock(100,2)); eq(A.activity[1].result,nil)
+    eq(history.next,before); eq(A.quotes[1].at,6030)
+    MOCK.time = 6086; M.Tick(); eq(M.active,nil)
+    eq(history.next,before); eq(A.profile.lastSeenPrices[1],saved)
+    full = true; observe(6100,stock(100,2)); eq(history.next,before+1)
 end)
 
-test("turning auto off cancels its round and late events cannot update statistics", function()
+test("turning auto off cancels its round and late events cannot update prices", function()
     local M = A.Market
     MOCK.time = 6200; assert(M.SetAuto(true)); local before = A.quotes[1]
     assert(M.SetAuto(false)); eq(M.active,nil); eq(#M.queue,0)
@@ -548,11 +518,13 @@ test("rapid resume drains the cancelled request before sending the same item aga
     local count = #MOCK.queries
     MOCK.time = 6502; assert(M.SetAuto(true)); eq(#MOCK.queries,count)
     local before = A.quotes[1]
+    local history = A.profile.priceHistory; local nextSample = history.next
     book = stock(100,100); M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1)
     eq(A.quotes[1],before); eq(M.active,nil)
+    eq(history.next,nextSample)
     MOCK.time = 6504; M.Tick(); eq(#MOCK.queries,count+1); eq(M.active.itemID,1)
     book = stock(100,40); M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1)
-    eq(A.activity[1].previous.levels[1].quantity,40); eq(A.activity[1].result,nil)
+    eq(A.quotes[1].levels[1].quantity,40); eq(history.next,nextSample+1)
     M.SetAuto(false)
 end)
 
@@ -565,28 +537,138 @@ test("cancelled partial queries expire without publishing or blocking the next s
     eq(A.quotes[1],before); eq(#MOCK.queries,count); assert(M.draining)
     MOCK.time = 6626; M.Tick(); eq(M.draining,nil); eq(#MOCK.queries,count)
     full = true; A.Native.ShowMonitor(); MOCK.flush(); M.Tick(); eq(M.active.itemID,1)
-    M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1); eq(A.activity[1].result,nil)
+    M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1); eq(A.quotes[1].complete,true)
     M.SetAuto(false)
 end)
 
-test("large or stale activity values stay readable with exact details in the tooltip", function()
-    A.activity = {}; observe(7000,stock(100,1000000000))
-    observe(7030,stock(99,1000000000))
+test("stale prices retain readable dates and a full timestamp in the tooltip", function()
+    observe(7000,stock(100,1000000000))
+    local q = observe(7030,stock(99,1000000000))
     local row = A.UI.productRows[A.Selected().id]
-    eq(row.activity:GetText(),"悬停查看"); assert(row.help:find("+1000000000 / -1000000000 / 200.0%",1,true))
-    MOCK.time = 7160; A.RefreshUI(); assert(row.activity:GetText():find("历史",1,true))
-    assert(row.help:find("上次有效结果",1,true))
+    eq(row.priceTime:GetText(),date("%m-%d %H:%M",q.seenAt))
+    assert(row.help:find("采样最低单价：99铜",1,true))
+    MOCK.time = 7160; A.RefreshUI(); assert(row.priceTime:GetText():find("历史",1,true))
+    assert(row.help:find(date("%Y-%m-%d %H:%M:%S",q.seenAt),1,true))
 end)
 
-test("AH close clears session statistics and never persists auto mode", function()
+test("a native observation cannot relabel the timestamp of the displayed monitor quote", function()
+    local row = A.UI.productRows[A.Selected().id]
+    local seenAt = A.quotes[1].seenAt; local nextSample = A.profile.priceHistory.next
+    MOCK.serverTime = MOCK.serverTime + 300; book = stock(1,10)
+    A.History.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1); A.RefreshUI()
+    eq(A.profile.lastSeenPrices[1].seenAt,MOCK.serverTime)
+    eq(A.profile.priceHistory.next,nextSample); eq(A.quotes[1].seenAt,seenAt)
+    assert(row.help:find(date("%Y-%m-%d %H:%M:%S",seenAt),1,true))
+    assert(row.help:find("采样最低单价：99铜",1,true))
+end)
+
+test("invalid saved price metadata cannot break the timestamp column", function()
+    local row = A.UI.productRows[A.Selected().id]
+    local saved, quotes = A.profile.lastSeenPrices, A.quotes
+    A.profile.lastSeenPrices = "preserved"; A.quotes = {}; A.RefreshUI()
+    eq(row.priceTime:GetText(),"待采样"); eq(A.profile.lastSeenPrices,"preserved")
+    A.profile.lastSeenPrices = {[1]={price=1,seenAt="invalid",priceVersion=2}}; A.RefreshUI()
+    eq(row.priceTime:GetText(),"待采样")
+    A.profile.lastSeenPrices, A.quotes = saved, quotes; A.RefreshUI()
+end)
+
+test("AH close preserves price history and never persists auto mode", function()
     local M = A.Market
+    local history = A.profile.priceHistory; local nextSample = history.next
     assert(M.SetAuto(true)); event("AUCTION_HOUSE_CLOSED")
-    eq(M.auto,false); eq(M.active,nil); eq(#M.queue,0); eq(next(A.activity),nil)
-    eq(A.profile.activity,nil); eq(A.profile.auto,nil)
+    eq(M.auto,false); eq(M.active,nil); eq(#M.queue,0); eq(history.next,nextSample)
+    eq(A.profile.auto,nil)
     event("AUCTION_HOUSE_SHOW"); MOCK.flush(); A.Native.ShowMonitor(); MOCK.flush()
     local count = #MOCK.queries; MOCK.time = 7300; M.Tick(); eq(#MOCK.queries,count)
-    observe(7330,stock(100,20)); eq(A.activity[1].result,nil)
-    A.DeleteProduct(A.Selected().id); eq(A.activity[1],nil)
+    observe(7330,stock(100,20)); eq(history.next,nextSample+1)
+    A.DeleteProduct(A.Selected().id); eq(history.next,nextSample+1)
+end)
+
+local function resetProfitFixture()
+    local M = A.Market
+    M.Pause(); M.draining, M.auto, M.nextSend = nil, false, 0
+    A.profile = {products={},nextID=1}; A.quotes = {}
+    AuctionPilotDB = {version=2,profiles={["TestRealm:TestCharacter"]=A.profile}}
+    MOCK.time, MOCK.serverTime = 10000, 1794460000
+    A.History.Initialize(); event("AUCTION_HOUSE_SHOW"); MOCK.flush()
+    A.Native.ShowMonitor(); MOCK.flush(); full = true
+    assert(A.SaveProduct({itemID=1,recipeName="历史利润",output=1,fee=5,extra=0,
+        materials={{itemID=2,quantity=2,source="auction"}}}))
+    A.AcceptQuote(2,A.Logic.Snapshot(stock(400,200),MOCK.time,true))
+    A.AcceptQuote(1,A.Logic.Snapshot(stock(1200,100),MOCK.time,true))
+    A.UI.priceEdited = false; A.UI.price:SetCopper(1200)
+    return M, A.profile.priceHistory
+end
+
+test("a failed refresh keeps the last profit without renewing its age or making it a live price", function()
+    local M, history = resetProfitFixture()
+    local before, sale, nextSample = A.Estimate(A.Selected()), A.quotes[1], history.next
+    assert(M.RequestItem(1)); M.Tick(); MOCK.time = MOCK.time+26; M.Tick()
+    eq(A.quotes[1],sale); eq(sale.at,10000); eq(sale.seenAt,1794460000)
+    local result = A.Estimate(A.Selected())
+    eq(result.roi,before.roi); eq(result.stale,true); assert(result.refreshError)
+    eq(history.next,nextSample); eq(A.UI.usePrice:IsEnabled(),false); eq(A.UI.price:GetCopper(),nil)
+    assert(A.UI.productRows[1].help:find("沿用上次完整报价",1,true))
+    eq(A.UI.productRows[1].age:GetText(),"刷新失败")
+    book = stock(1400,100); assert(M.RequestItem(1)); M.Tick()
+    MOCK.serverTime = MOCK.serverTime+30; M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1)
+    result = A.Estimate(A.Selected())
+    assert(result.roi>before.roi); eq(result.stale,false); eq(result.refreshError,nil)
+    eq(A.quotes[1].seenAt,1794460030); eq(history.next,nextSample+1)
+    eq(A.UI.usePrice:IsEnabled(),true); eq(A.UI.price:GetCopper(),1400)
+end)
+
+test("a successful empty market replaces the old price instead of retaining a fabricated profit", function()
+    local M, history = resetProfitFixture()
+    local nextSample = history.next
+    book = {}; assert(M.RequestItem(1)); M.Tick(); M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1)
+    eq(A.Estimate(A.Selected()).unitProfit,nil); eq(history.samples[nextSample][3],false)
+    eq(#A.quotes[1].levels,0)
+    MOCK.time = MOCK.time+2; assert(M.RequestItem(1)); M.Tick(); MOCK.time = MOCK.time+26; M.Tick()
+    eq(A.Estimate(A.Selected()).unitProfit,nil); eq(history.next,nextSample+1)
+end)
+
+test("failure without a complete session quote never restores a profit from saved price history", function()
+    local M = resetProfitFixture()
+    A.quotes[1] = nil
+    assert(M.RequestItem(1)); M.Tick(); MOCK.time = MOCK.time+26; M.Tick()
+    eq(A.Estimate(A.Selected()).unitProfit,nil); eq(A.quotes[1].complete,false)
+    assert(A.quotes[1].error); assert(A.profile.lastSeenPrices[1].price)
+end)
+
+test("recipe edits recalculate retained prices and release session quotes no longer referenced", function()
+    resetProfitFixture()
+    local original = A.Estimate(A.Selected()).roi
+    A.AcceptQuote(3,A.Logic.Snapshot(stock(500,100),MOCK.time,true))
+    event("AUCTION_HOUSE_CLOSED"); event("AUCTION_HOUSE_SHOW"); MOCK.flush()
+    assert(A.SaveProduct({id=1,itemID=1,recipeID=1,recipeName="历史利润",output=1,fee=5,extra=0,
+        materials={{itemID=2,quantity=3,source="auction"}}}))
+    local result = A.Estimate(A.Selected())
+    assert(result.roi<original); eq(result.stale,true); eq(A.quotes[3],nil)
+    assert(A.quotes[1] and A.quotes[2]); assert(A.profile.lastSeenPrices[3])
+    A.DeleteProduct(1); eq(next(A.quotes),nil)
+    eq(A.profile.quotes,nil); assert(A.profile.priceHistory.next>1)
+end)
+
+test("late success and failure cannot restore session quotes after the last reference is deleted", function()
+    for _, timeout in ipairs({false,true}) do
+        local M, history = resetProfitFixture()
+        local nextSample = history.next
+        assert(M.RequestItem(1)); M.Tick(); eq(M.active.itemID,1)
+        A.DeleteProduct(1); eq(next(A.quotes),nil)
+        if timeout then MOCK.time = MOCK.time+26; M.Tick()
+        else book = stock(1300,100); M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1) end
+        eq(next(A.quotes),nil); eq(history.next,nextSample)
+        event("AUCTION_HOUSE_CLOSED"); event("AUCTION_HOUSE_SHOW"); MOCK.flush()
+        eq(next(A.quotes),nil)
+    end
+    local M, history = resetProfitFixture()
+    assert(A.SaveProduct({itemID=4,recipeName="共享材料",output=1,fee=5,extra=0,
+        materials={{itemID=1,quantity=1,source="auction"}}}))
+    local nextSample = history.next
+    assert(M.RequestItem(1)); M.Tick(); A.DeleteProduct(1)
+    book = stock(1300,100); M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1)
+    eq(A.quotes[1].levels[1].price,1300); eq(history.next,nextSample)
 end)
 
 MOCK.addon = A

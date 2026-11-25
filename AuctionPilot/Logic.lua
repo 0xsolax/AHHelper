@@ -22,6 +22,17 @@ function L.ItemID(value)
     return L.Number(value:match("item:(%d+)") or value:match("^%s*(%d+)%s*$"), 1, 10000000, true)
 end
 
+function L.TrackedItems(products)
+    local tracked = {}
+    for _, product in ipairs(products) do
+        tracked[product.itemID] = true
+        for _, recipe in ipairs(product.recipes) do
+            for _, material in ipairs(recipe.materials) do tracked[material.itemID] = true end
+        end
+    end
+    return tracked
+end
+
 function L.RecipeInput(product, recipe)
     return { itemID = product.itemID, fee = product.fee, output = recipe.output,
         extra = recipe.extra, materials = recipe.materials }
@@ -97,37 +108,10 @@ function L.Snapshot(rows, at, complete)
     return snapshot
 end
 
-function L.Fresh(snapshot, now, ttl)
+function L.Fresh(snapshot, now, ttl, allowHistorical)
     return snapshot and snapshot.complete and not snapshot.error
+        and (allowHistorical or not snapshot.historical)
         and now >= snapshot.at and now - snapshot.at <= ttl
-end
-
--- Compare the union of exact prices inside the SAME reference range, including own stock.
-function L.Activity(previous, current, reference)
-    if not previous or not current or not previous.complete or not current.complete
-        or previous.error or current.error or not reference then return nil end
-    local changes, before, after = {}, 0, 0
-    for _, level in ipairs(previous.levels) do
-        if level.price <= reference then
-            changes[level.price] = -level.quantity
-            before = before + level.quantity
-        end
-    end
-    for _, level in ipairs(current.levels) do
-        if level.price <= reference then
-            changes[level.price] = (changes[level.price] or 0) + level.quantity
-            after = after + level.quantity
-        end
-    end
-    local increase, decrease = 0, 0
-    for _, delta in pairs(changes) do
-        increase = increase + math.max(0, delta)
-        decrease = decrease + math.max(0, -delta)
-    end
-    local average = (before + after) / 2
-    return { increase = increase, decrease = decrease, previousQuantity = before, quantity = after,
-        rate = average > 0 and (increase + decrease) / average * 100 or nil,
-        reference = reference, from = previous.at, at = current.at }
 end
 
 function L.PurchaseCost(snapshot, quantity)
@@ -154,7 +138,7 @@ function L.UsesMarketPrice(material, prices)
     return material.source == "auction" or (material.source == "market" and not L.VendorPrice(material, prices))
 end
 
-function L.Estimate(product, quotes, now, ttl, batches, saleOverride, vendorPrices)
+function L.Estimate(product, quotes, now, ttl, batches, saleOverride, vendorPrices, allowHistorical)
     local valid, err = L.Validate(product)
     if not valid then return { error = err, materials = {} } end
     batches = batches or 1
@@ -164,7 +148,7 @@ function L.Estimate(product, quotes, now, ttl, batches, saleOverride, vendorPric
     if saleOverride then
         if L.Number(saleOverride, 1, 1000000000000, true) then result.sale = saleOverride
         else result.error = "销售单价无效" end
-    elseif L.Fresh(saleQuote, now, ttl) and saleQuote.levels[1] then
+    elseif L.Fresh(saleQuote, now, ttl, allowHistorical) and saleQuote.levels[1] then
         result.sale = saleQuote.levels[1].price
     else
         result.error = saleQuote and saleQuote.error or "成品缺价或行情已过期"
@@ -185,7 +169,7 @@ function L.Estimate(product, quotes, now, ttl, batches, saleOverride, vendorPric
         else
             row.source = "market"
             local quote = quotes[material.itemID]
-            if not L.Fresh(quote, now, ttl) then
+            if not L.Fresh(quote, now, ttl, allowHistorical) then
                 row.error = quote and quote.error or "缺价或已过期"
             else
                 row.cost, row.available = L.PurchaseCost(quote, quantity)

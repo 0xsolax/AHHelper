@@ -14,7 +14,6 @@ function M.Pause()
     if M.active then M.draining = M.active end
     M.queue, M.active = {}, nil
     M.batchAuto, M.nextAuto = false, nil
-    if A.BreakActivity then A.BreakActivity(nil, "已暂停") end
 end
 
 function M.SetAuto(enabled)
@@ -22,7 +21,6 @@ function M.SetAuto(enabled)
     if enabled and (M.active or #M.queue > 0) then return nil, "正在更新，请稍候。" end
     M.auto, M.nextAuto = enabled == true, nil
     if M.auto then
-        if A.BreakActivity then A.BreakActivity(nil, "采样中") end
         M.Tick()
     elseif M.batchAuto then M.Pause() end
     A.RefreshUI()
@@ -88,9 +86,14 @@ local function fail(message)
     local active = M.active
     if not active then return end
     local old = A.quotes[active.itemID]
-    A.quotes[active.itemID] = { levels = old and old.levels or {}, at = old and old.at or 0,
-        complete = false, error = message }
-    if A.BreakActivity then A.BreakActivity(active.itemID, "查询失败") end
+    if not A.Logic.TrackedItems(A.profile.products)[active.itemID] then
+        A.quotes[active.itemID] = nil
+    elseif old and old.complete and not old.error then
+        old.historical, old.refreshError = true, message
+    else
+        A.quotes[active.itemID] = { levels = old and old.levels or {}, at = old and old.at or 0,
+            complete = false, error = message }
+    end
     M.active = nil
     roundFinished()
     A.RefreshUI()

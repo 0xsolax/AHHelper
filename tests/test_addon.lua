@@ -277,34 +277,6 @@ test("targeted refreshes select one recipe or one item without expanding the sco
     eq(#M.queue,0); A.open = true
 end)
 
-test("price-level activity sees offsetting increases and decreases below one reference", function()
-    local before = L.Snapshot({{price=1150,quantity=100}},100,true)
-    local after = L.Snapshot({{price=1145,quantity=30},{price=1146,quantity=10},
-        {price=1149,quantity=10},{price=1150,quantity=50},{price=1200,quantity=999}},130,true)
-    local result = assert(L.Activity(before,after,1150))
-    eq(result.increase,50); eq(result.decrease,50); eq(result.rate,100)
-    eq(result.previousQuantity,100); eq(result.quantity,100); eq(result.reference,1150)
-    eq(result.from,100); eq(result.at,130)
-end)
-
-test("activity includes own listings and reports unchanged books as zero", function()
-    local before = L.Snapshot({{price=100,quantity=100,own=100}},100,true)
-    local after = L.Snapshot({{price=100,quantity=150,own=150}},130,true)
-    eq(L.Activity(before,after,100).increase,50)
-    eq(L.Activity(before,after,100).rate,40)
-    eq(L.Activity(before,before,100).rate,0)
-end)
-
-test("empty books distinguish a full disappearance from no denominator", function()
-    local fullBook = L.Snapshot({{price=100,quantity=10}},100,true)
-    local empty = L.Snapshot({},130,true)
-    eq(L.Activity(fullBook,empty,100).rate,200)
-    eq(L.Activity(empty,fullBook,100).rate,200)
-    eq(L.Activity(empty,empty,100).rate,nil)
-    fullBook.complete = false; eq(L.Activity(fullBook,empty,100),nil)
-    fullBook.complete = true; fullBook.error = "failed"; eq(L.Activity(fullBook,empty,100),nil)
-end)
-
 test("auto refresh queries watched products only and waits from round completion", function()
     M.Pause(); now = 2000; ready = true; full = true
     assert(M.SetAuto(true)); eq(M.active.itemID,1); eq(table.concat(M.queue,","),"7")
@@ -322,7 +294,8 @@ test("partial or missing result rows cannot become an empty complete book", func
     local read = C_AuctionHouse.GetCommoditySearchResultInfo
     C_AuctionHouse.GetCommoditySearchResultInfo = function() return nil end
     M.OnEvent("COMMODITY_SEARCH_RESULTS_UPDATED",1)
-    eq(A.quotes[1].complete,false); assert(A.quotes[1].error)
+    eq(A.quotes[1].complete,true); assert(A.quotes[1].refreshError)
+    eq(L.Fresh(A.quotes[1],now,120),false)
     C_AuctionHouse.GetCommoditySearchResultInfo = read
 end)
 
@@ -352,6 +325,9 @@ end)
 
 test("item pages must be complete and readable before publishing a replacement", function()
     M.Pause(); now = 2400
+    local watched = L.Copy(A.profile.products[1])
+    watched.id, watched.itemID = 3, 20744
+    table.insert(A.profile.products,watched)
     local key = {itemID=20744,itemSuffix=0,battlePetSpeciesID=0}
     local itemFull, calls = false, 0
     C_AuctionHouse.HasFullItemSearchResults = function() return itemFull end
@@ -365,7 +341,8 @@ test("item pages must be complete and readable before publishing a replacement",
     now = 2410; assert(M.RequestItem(20744)); M.Tick()
     C_AuctionHouse.GetItemSearchResultInfo = function() return nil end
     M.OnEvent("ITEM_SEARCH_RESULTS_UPDATED",key)
-    eq(A.quotes[20744].complete,false); eq(A.quotes[20744].levels[1].quantity,45)
+    eq(A.quotes[20744].complete,true); eq(A.quotes[20744].levels[1].quantity,45)
+    assert(A.quotes[20744].refreshError); eq(L.Fresh(A.quotes[20744],now,120),false)
 end)
 
 print("TOTAL " .. passed .. " tests passed")

@@ -269,6 +269,11 @@ local function post(kind, item, duration, quantity, price, bid)
     return MOCK.needsConfirmation or false
 end
 C_AuctionHouse = {
+    GetBrowseResults = function() return MOCK.browseResults or {} end,
+    SendBrowseQuery = function() MOCK.browseQueries = (MOCK.browseQueries or 0)+1 end,
+    SearchForFavorites = function() MOCK.browseQueries = (MOCK.browseQueries or 0)+1 end,
+    SearchForItemKeys = function() MOCK.browseQueries = (MOCK.browseQueries or 0)+1 end,
+    RequestMoreBrowseResults = function() MOCK.browsePageRequests = (MOCK.browsePageRequests or 0)+1 end,
     MakeItemKey = function(id) return {itemID = id} end,
     GetItemKeyFromItem = function() return {itemID=MOCK.bagItemID or 1,itemSuffix=MOCK.itemSuffix or 0} end,
     GetItemKeyInfo = function()
