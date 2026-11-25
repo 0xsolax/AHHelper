@@ -2,7 +2,12 @@ local _, A = ...
 local M = { queue = {}, active = nil, nextSend = 0, auto = false, discardUntil = {} }
 A.Market = M
 
-function M.IsVisible()
+function M.IsVisible(scan)
+    if scan == nil then scan = M.batch and M.batch.scan end
+    if not A.open or (A.Native and A.Native.pendingPost) then return false end
+    local professionVisible = A.Native and A.Native.ProfessionVisible and A.Native.ProfessionVisible()
+    if scan then return professionVisible and A.UI.frame:IsShown()
+        and not (A.Editor.frame and A.Editor.frame:IsShown()) end
     return A.open and A.UI and A.UI.frame and A.UI.frame:IsShown()
         and (not A.UI.main or A.UI.main:IsShown())
         and not (A.Editor and A.Editor.frame and A.Editor.frame:IsShown())
@@ -12,14 +17,16 @@ end
 function M.Pause()
     -- Search events have no request token. Drain an in-flight response before reusing its item key.
     if M.active then M.draining = M.active end
+    if A.FinishRecipeScan then A.FinishRecipeScan(M.batch, "扫描已中断，请重新扫描") end
     M.queue, M.active = {}, nil
     M.batchAuto, M.nextAuto = false, nil
     M.batch, M.waitSince = nil, nil
 end
 
 function M.SetAuto(enabled)
-    if enabled and not M.IsVisible() then return nil, "请在拍卖行打开监控列表。" end
+    if enabled and not M.IsVisible(false) then return nil, "请在拍卖行打开监控列表。" end
     if enabled and (M.active or #M.queue > 0) then return nil, "正在更新，请稍候。" end
+    if enabled and M.batch and M.batch.scan then M.batch = nil end
     M.auto, M.nextAuto = enabled == true, nil
     if M.auto then
         M.Tick()
@@ -30,14 +37,15 @@ end
 
 local function roundFinished()
     if not M.active and #M.queue == 0 then
+        if A.FinishRecipeScan then A.FinishRecipeScan(M.batch) end
         M.batchAuto = false
         M.waitSince = nil
         M.nextAuto = M.auto and A.Now() + 30 or nil
     end
 end
 
-local function enqueue(items)
-    if not M.IsVisible() then return nil, "请在拍卖行打开监控面板。" end
+local function enqueue(items, scan)
+    if not M.IsVisible(scan ~= nil) then return nil, "请在拍卖行打开对应的查询面板。" end
     if M.active or #M.queue > 0 then return nil, "正在更新，请稍候。" end
     local queue, seen = {}, {}
     for _, id in ipairs(items) do
@@ -45,10 +53,32 @@ local function enqueue(items)
     end
     if #queue == 0 then return nil, "没有需要查询的拍卖行报价。" end
     M.queue, M.batchAuto = queue, false
-    M.batch = { total = #queue, completed = 0, failed = 0, attempts = {} }
+    M.batch = { total = #queue, completed = 0, failed = 0, attempts = {}, scan = scan }
     M.waitSince = nil
     A.RefreshUI()
     return true
+end
+
+function M.RequestRecipe(draft)
+    return M.RequestRecipes({draft})
+end
+
+function M.RequestRecipes(drafts)
+    local items, unique, seen = {}, {}, {}
+    for _, draft in ipairs(drafts) do
+        local valid, err = A.Logic.Validate(draft)
+        if not valid then return nil, err end
+        if not A.Logic.ItemID(draft.sourceRecipeID) then return nil, "请先选择专业配方。" end
+        if not seen[draft.sourceRecipeID] then
+            seen[draft.sourceRecipeID] = true; unique[#unique + 1] = A.Logic.Copy(draft)
+            items[#items + 1] = draft.itemID
+            for _, material in ipairs(draft.materials) do
+                if A.Logic.UsesMarketPrice(material, A.profile.vendorPrices) then items[#items + 1] = material.itemID end
+            end
+        end
+    end
+    return enqueue(items, {drafts = unique, quotes = {}, errors = {}, finished = {},
+        vendorPrices = A.Logic.Copy(A.profile.vendorPrices)})
 end
 
 function M.RequestItem(itemID)
@@ -106,12 +136,14 @@ local function fail(message, retryable, timedOut)
     local batch = M.batch
     if batch then
         if retryable ~= false and batch.attempts[active.itemID] == 1
-            and A.Logic.TrackedItems(A.profile.products)[active.itemID] then
+            and (batch.scan or A.Logic.TrackedItems(A.profile.products)[active.itemID]) then
             table.insert(M.queue, active.itemID)
         else
             batch.failed = batch.failed + 1
+            if batch.scan then batch.scan.errors[active.itemID] = message end
         end
     end
+    if A.FinishRecipeScan then A.FinishRecipeScan(M.batch) end
     roundFinished()
     A.RefreshUI()
 end
@@ -120,9 +152,14 @@ local function finish(rows)
     local id = M.active.itemID
     local quote = A.Logic.Snapshot(rows, A.Now(), true)
     M.active = nil
-    if M.batch then M.batch.completed = M.batch.completed + 1 end
-    roundFinished()
+    if M.batch then
+        M.batch.completed = M.batch.completed + 1
+        if M.batch.scan then M.batch.scan.quotes[id] = quote end
+    end
     A.AcceptQuote(id, quote)
+    if A.FinishRecipeScan then A.FinishRecipeScan(M.batch) end
+    roundFinished()
+    A.RefreshUI()
 end
 
 function M.ReadCommodity()
@@ -216,7 +253,7 @@ function M.Tick()
     end
     if M.draining then return end
     if M.active and now - M.active.started >= 25 then fail("查询超时，请刷新重试", true, true) end
-    if M.auto and not M.active and #M.queue == 0 and now >= (M.nextAuto or 0) then
+    if M.auto and not (M.batch and M.batch.scan) and not M.active and #M.queue == 0 and now >= (M.nextAuto or 0) then
         if M.RequestRefresh("sale") then M.batchAuto = true
         else M.nextAuto = now + 30 end
     end
@@ -226,6 +263,7 @@ function M.Tick()
         if now - M.waitSince >= 30 then
             local reason = "限流等待超过30秒，本轮已停止，可重新刷新"
             if M.active then fail(reason, false, true) end
+            if A.FinishRecipeScan then A.FinishRecipeScan(M.batch, reason) end
             M.queue, M.auto, M.batchAuto, M.nextAuto, M.waitSince = {}, false, false, nil, nil
             if M.batch then M.batch.stopped = reason end
             A.RefreshUI()
@@ -293,6 +331,9 @@ function M.StartTicker()
     M.ticker = C_Timer.NewTicker(0.25, function()
         M.Tick()
         elapsed = elapsed + 0.25
-        if elapsed >= 1 then elapsed = 0; if M.IsVisible() then A.RefreshUI() end end
+        if elapsed >= 1 then
+            elapsed = 0
+            if M.IsVisible() or A.Native.ProfessionVisible() then A.RefreshUI() end
+        end
     end)
 end

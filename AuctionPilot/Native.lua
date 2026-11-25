@@ -5,24 +5,32 @@ A.Native = N
 function N.RecordMerchantPrices()
     if not C_MerchantFrame or not C_MerchantFrame.GetItemInfo
         or not GetMerchantItemID or not GetMerchantNumItems then return end
-    local tracked = A.PruneVendorPrices()
-    if not next(tracked) then return end
     local L = A.Logic
+    local tracked = L.TrackedItems(A.profile.products)
+    for itemID in pairs(A.profile.vendorPrices) do tracked[itemID] = true end
+    if not next(tracked) then return end
     for index = 1, GetMerchantNumItems() or 0 do
         local itemID = GetMerchantItemID(index)
         if tracked[itemID] then
             local info = C_MerchantFrame.GetItemInfo(index)
-            if info and info.name and info.name ~= "" and info.isPurchasable and info.numAvailable == -1
+            if info and info.name and info.name ~= ""
                 and not info.hasExtendedCost and not info.currencyID and not info.spellID
-                and L.Number(info.price, 1, 1000000000000, true)
-                and L.Number(info.stackCount, 1, 100000, true) then
+                and L.Number(info.numAvailable, -1, 1000000000, true) then
                 local previous = L.VendorPrice({itemID = itemID, source = "vendor"}, A.profile.vendorPrices)
-                A.profile.vendorPrices[itemID] = { price = info.price, stackCount = info.stackCount, seenAt = GetServerTime() }
-                if not previous or previous.price / previous.stackCount ~= info.price / info.stackCount then
-                    local _, _, link = A.ItemInfo(itemID)
-                    local unit = (info.price % info.stackCount ~= 0 and "约 " or "") .. L.Money(info.price / info.stackCount)
-                    A.Message((previous and "商店价已更新：" or "已记录商店价：") .. (link or info.name)
-                        .. " · " .. unit .. " / 件（" .. L.Money(info.price) .. " / " .. info.stackCount .. " 件）")
+                if info.isPurchasable and L.Number(info.price, 1, 1000000000000, true)
+                    and L.Number(info.stackCount, 1, 100000, true) then
+                    local now = GetServerTime()
+                    A.profile.vendorPrices[itemID] = {price = info.price, stackCount = info.stackCount, seenAt = now,
+                        numAvailable = info.numAvailable, stockSeenAt = now}
+                    if not previous or previous.price / previous.stackCount ~= info.price / info.stackCount then
+                        local _, _, link = A.ItemInfo(itemID)
+                        local unit = (info.price % info.stackCount ~= 0 and "约 " or "") .. L.Money(info.price / info.stackCount)
+                        A.Message((previous and "商店价已更新：" or "已记录商店价：") .. (link or info.name)
+                            .. " · " .. unit .. " / 件（" .. L.Money(info.price) .. " / " .. info.stackCount .. " 件）")
+                    end
+                elseif previous and info.numAvailable == 0 then
+                    -- A sold-out offer may no longer expose a purchasable price. Keep its original price time.
+                    previous.numAvailable, previous.stockSeenAt = 0, GetServerTime()
                 end
             end
         end
@@ -30,15 +38,39 @@ function N.RecordMerchantPrices()
     A.RefreshUI()
 end
 
--- Read only the native profession selection; never craft or change its filters.
-function N.ReadRecipe()
-    local form = ProfessionsFrame and ProfessionsFrame.CraftingPage and ProfessionsFrame.CraftingPage.SchematicForm
+function N.ProfessionVisible()
+    local page = ProfessionsFrame and ProfessionsFrame.CraftingPage
+    return page and page.IsVisible and page:IsVisible() and ProfessionsFrame:IsShown()
+end
+
+function N.CurrentRecipe()
+    local page = ProfessionsFrame and ProfessionsFrame.CraftingPage
+    local form = page and page.SchematicForm
+    if not form or not form.GetRecipeInfo then return end
+    local ok, info = pcall(form.GetRecipeInfo, form)
+    return ok and info or nil
+end
+
+-- Explicit IDs read favorites without selecting them or changing native filters.
+function N.ReadRecipe(recipeID)
+    if ProfessionsFrame and ProfessionsFrame.IsShown and not ProfessionsFrame:IsShown() then
+        return nil, "请先打开专业窗口并选择一个配方。"
+    end
+    local page = ProfessionsFrame and ProfessionsFrame.CraftingPage
+    if page and page.IsVisible and not page:IsVisible() then return nil, "请切回专业制作页面并选择配方。" end
+    local form = page and page.SchematicForm
     if not form or not form.GetRecipeInfo then return nil, "请先打开专业窗口并选择一个配方，再点击读取。" end
     if not C_TradeSkillUI or not C_TradeSkillUI.GetRecipeSchematic then return nil, "当前客户端没有可用的配方读取接口。" end
     local ok, info, schematic = pcall(function()
-        local selected = form:GetRecipeInfo()
+        local selected
+        if recipeID then selected = C_TradeSkillUI.GetRecipeInfo(recipeID)
+        else selected = form:GetRecipeInfo() end
         if not selected or not selected.recipeID then return end
-        local level = form.GetCurrentRecipeLevel and form:GetCurrentRecipeLevel() or nil
+        if recipeID and Professions and Professions.GetHighestLearnedRecipe then
+            selected = Professions.GetHighestLearnedRecipe(selected) or selected
+        end
+        local level = recipeID and selected.unlockedRecipeLevel
+            or (not recipeID and form.GetCurrentRecipeLevel and form:GetCurrentRecipeLevel()) or nil
         return selected, C_TradeSkillUI.GetRecipeSchematic(selected.recipeID, false, level)
     end)
     if not ok or not info or not schematic or schematic.recipeID ~= info.recipeID then
@@ -78,6 +110,52 @@ function N.ReadRecipe()
     local valid, err = L.Validate(draft)
     if not valid then return nil, err end
     return draft
+end
+
+function N.FavoriteRecipes()
+    if not N.ProfessionVisible() then return nil, "请先打开专业制作页面。" end
+    if not C_TradeSkillUI.GetAllRecipeIDs or not C_TradeSkillUI.IsRecipeFavorite then
+        return nil, "当前客户端没有可用的偏好配方接口。"
+    end
+    local ok, favorites = pcall(function()
+        local found, seen = {}, {}
+        for _, id in ipairs(C_TradeSkillUI.GetAllRecipeIDs()) do
+            if not seen[id] and C_TradeSkillUI.IsRecipeFavorite(id) then
+                seen[id] = true; found[#found + 1] = id
+            end
+        end
+        return found
+    end)
+    if not ok then return nil, "偏好配方尚未载入，请稍后再扫描。" end
+    return favorites
+end
+
+function N.EndProfessionScan()
+    if A.Market.batch and A.Market.batch.scan then A.Market.Pause() end
+    for _, record in pairs(A.scanResults) do record.historical = true end
+    if A.UI.profession then A.UI.RestoreProfessionSize() end
+    A.RefreshUI()
+end
+
+function N.InstallProfessionScan()
+    local page = ProfessionsFrame and ProfessionsFrame.CraftingPage
+    if not page or not page.HookScript or not page.SchematicForm or not page.SchematicForm.HookScript
+        or not page.RecipeList or not page.RecipeList.ScrollBox or not A.UI then return end
+    A.UI.BuildProfessionScan(page)
+    if not page.auctionPilotScanHooked then
+        page.auctionPilotScanHooked = true
+        page:HookScript("OnHide", N.EndProfessionScan)
+        ProfessionsFrame:HookScript("OnHide", N.EndProfessionScan)
+        ProfessionsFrame:HookScript("OnShow", function() A.UI.RefreshProfessionScan() end)
+        page:HookScript("OnShow", function() A.UI.RefreshProfessionScan() end)
+        hooksecurefunc(page.SchematicForm, "Init", function() A.UI.RefreshProfessionScan() end)
+        local scroll = page.RecipeList.ScrollBox
+        if ScrollUtil and ScrollUtil.AddInitializedFrameCallback then
+            ScrollUtil.AddInitializedFrameCallback(scroll, function(_, row) A.UI.InitializeProfessionRow(row) end, N)
+        end
+        scroll:ForEachFrame(A.UI.InitializeProfessionRow)
+    end
+    A.UI.RefreshProfessionScan()
 end
 
 function N.Attach()
@@ -249,6 +327,14 @@ local function finishPost(pending)
 end
 
 function N.OnEvent(event, itemID)
+    if event == "TRADE_SKILL_SHOW" or event == "ADDON_LOADED" or event == "TRADE_SKILL_DATA_SOURCE_CHANGED" then
+        N.InstallProfessionScan()
+    end
+    if event == "TRADE_SKILL_CLOSE" or event == "TRADE_SKILL_DATA_SOURCE_CHANGING" then
+        N.EndProfessionScan()
+    elseif event == "TRADE_SKILL_LIST_UPDATE" or event == "TRADE_SKILL_FAVORITES_CHANGED" then
+        A.UI.RefreshProfessionScan()
+    end
     if event == "MERCHANT_SHOW" or (event == "MERCHANT_UPDATE" and MerchantFrame and MerchantFrame:IsShown()) then
         N.RecordMerchantPrices()
         return
