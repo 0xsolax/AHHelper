@@ -27,7 +27,7 @@ local function menuEntry(text)
     error("Menu entry not found: " .. text)
 end
 local function editSelected()
-    A.UI.detailMenu:Click(); menuEntry("编辑当前配方"):Click()
+    A.UI.detailMenu:Click(); menuEntry("编辑当前方案"):Click()
 end
 test("load all TOC modules and initialize offline", function()
     event("ADDON_LOADED", "AuctionPilot"); MOCK.flush()
@@ -123,7 +123,7 @@ test("reopening AH retains the last estimate as historical without querying or e
 end)
 test("one product row shows the selected recipe and menu switches independent estimates", function()
     A.Native.ShowMonitor(); MOCK.flush()
-    A.UI.productRows[1].menu:Click(); menuEntry("添加配方"):Click()
+    A.UI.productRows[1].menu:Click(); menuEntry("添加方案"):Click()
     A.Editor.name:SetText("双份方案"); A.Editor.output:SetText("2")
     A.Editor.rows[1].item:SetItem(2); A.Editor.rows[1].quantity:SetText("3")
     button("保存配方"):Click()
@@ -172,7 +172,7 @@ test("manual mode retains dated estimates but failed quotes never become profit"
 end)
 
 test("deleting the active recipe falls back without deleting other recipes", function()
-    A.Editor.Open(A.Selected()); button("删除配方"):Click(); eq(#A.Selected().recipes,2)
+    A.Editor.Open(A.Selected()); button("删除方案"):Click(); eq(#A.Selected().recipes,2)
     local popup = MOCK.popup; StaticPopupDialogs[popup.which].OnAccept(nil,popup.data)
     eq(#A.Selected().recipes,1); eq(A.SelectedRecipe().id,1)
     eq(A.DeleteRecipe(1,1),nil); eq(#A.Selected().recipes,1)
@@ -220,7 +220,7 @@ end)
 
 test("variable output uses its minimum and persists the visible assumption", function()
     enableRecipeAPI(); schematic.quantityMin,schematic.quantityMax = 2,4
-    A.UI.productRows[1].menu:Click(); menuEntry("添加配方"):Click(); A.Editor.import:Click()
+    A.UI.productRows[1].menu:Click(); menuEntry("添加方案"):Click(); A.Editor.import:Click()
     eq(A.Editor.output:GetText(),"2"); assert(A.Editor.sourceNote:GetText():find("按最低产量"))
     A.Editor.name:SetText("保守产量"); button("保存配方"):Click()
     eq(A.SelectedRecipe().output,2); eq(A.SelectedRecipe().sourceOutputMax,4)
@@ -716,6 +716,285 @@ test("leaving the monitor cancels retries and still ignores the failed attempt's
     eq(A.profile.lastSeenPrices[1],last); eq(history.next,before)
     MOCK.time = MOCK.time+60; M.Tick(); eq(#MOCK.queries,queries)
     A.Native.ShowMonitor(); MOCK.flush(); M.Tick(); eq(#MOCK.queries,queries)
+end)
+
+local function scanFixture(recipeID, itemID)
+    if ProfessionsFrame and ProfessionsFrame.Hide then ProfessionsFrame:Hide() end
+    enableRecipeAPI()
+    selectedRecipe.recipeID, schematic.recipeID = recipeID or 900, recipeID or 900
+    schematic.outputItemID = itemID or 1
+    MOCK.Profession({[selectedRecipe.recipeID]={info=selectedRecipe,schematic=schematic}},selectedRecipe.recipeID)
+    event("TRADE_SKILL_SHOW")
+    A.open = true; A.Native.pendingPost = nil
+    A.Market.Pause(); A.Market.auto = false; A.Market.draining = nil
+    A.Market.discardUntil = {}; A.Market.nextSend = 0
+    MOCK.ready = true; MOCK.keyInfo = nil
+end
+
+local function completeScan(prices)
+    local function rows(id)
+        if type(prices[id]) == "table" then return prices[id] end
+        return prices[id] and {{unitPrice=prices[id],quantity=100,numOwnerItems=0}} or {}
+    end
+    C_AuctionHouse.HasFullCommoditySearchResults = function() return true end
+    C_AuctionHouse.GetNumCommoditySearchResults = function(id) return #rows(id) end
+    C_AuctionHouse.GetCommoditySearchResultInfo = function(id,index) return rows(id)[index] end
+    local M = A.Market
+    for _ = 1, 20 do
+        MOCK.time = MOCK.time+2; M.Tick()
+        if M.active then event("COMMODITY_SEARCH_RESULTS_UPDATED",M.active.itemID) end
+        if not M.active and #M.queue == 0 then break end
+    end
+    eq(M.active,nil); eq(#M.queue,0)
+end
+
+test("profession scan reads the selected recipe and never saves a watch entry", function()
+    while #A.profile.products > 0 do A.DeleteProduct(A.profile.products[1].id) end
+    scanFixture()
+    local before = A.profile.nextID
+    assert(A.UI.ScanProfession())
+    eq(table.concat(A.Market.queue,","),"1,2,3")
+    completeScan({[1]=10000,[2]=2000,[3]=100})
+    eq(A.scanResults[900].estimate.unitProfit,5400)
+    eq(A.profile.nextID,before); eq(#A.profile.products,0)
+    eq(A.profile.scanResults,nil); eq(MOCK.postCalls,0)
+end)
+
+test("scanned recipes keep frozen independent results across page and auction closure", function()
+    local first = A.scanResults[900]
+    scanFixture(901,4); assert(A.UI.ScanProfession())
+    selectedRecipe.recipeID = 999 -- Selection changes cannot relabel a batch in flight.
+    completeScan({[4]=20000,[2]=3000,[3]=100})
+    eq(A.scanResults[900],first); eq(first.estimate.unitProfit,5400)
+    eq(A.scanResults[901].draft.itemID,4); eq(A.scanResults[999],nil)
+    ProfessionsFrame:Hide(); event("AUCTION_HOUSE_CLOSED")
+    eq(A.scanResults[900],first); eq(A.scanResults[901].estimate.unitProfit,12900)
+    event("AUCTION_HOUSE_SHOW"); MOCK.flush(); ProfessionsFrame:Show(); A.UI.RefreshProfessionScan()
+    eq(A.scanResults[900],first); eq(first.estimate.unitProfit,5400)
+    selectedRecipe.recipeID=901; A.UI.RefreshProfessionScan(); eq(A.UI.profession.sale:GetText(),A.Logic.Money(A.scanResults[901].estimate.sale))
+end)
+
+test("a cancelled rescan preserves the old result and its original quote time", function()
+    local old = A.scanResults[900]
+    scanFixture(); assert(A.UI.ScanProfession()); A.Market.Tick()
+    ProfessionsFrame:Hide()
+    eq(A.Market.active,nil); eq(#A.Market.queue,0)
+    eq(A.scanResults[900],old); assert(old.refreshError:find("中断"))
+    local at = old.at
+    event("COMMODITY_SEARCH_RESULTS_UPDATED",1)
+    eq(A.scanResults[900].at,at); eq(old.estimate.unitProfit,5400)
+end)
+
+test("complete empty or insufficient markets replace old profit with an unknown result", function()
+    scanFixture(); assert(A.UI.ScanProfession())
+    completeScan({[2]=2000,[3]=100})
+    eq(A.scanResults[900].estimate.unitProfit,nil); assert(A.scanResults[900].estimate.error)
+    scanFixture(); assert(A.UI.ScanProfession())
+    completeScan({[1]=10000,[2]=2000,[3]=100})
+    eq(A.scanResults[900].estimate.unitProfit,5400)
+end)
+
+test("adding a scan reuses existing watches without overwriting their configuration", function()
+    assert(A.AddRecipeScan(900)); eq(#A.profile.products,1)
+    local product = A.Selected(); local recipe = A.SelectedRecipe()
+    eq(recipe.sourceRecipeID,900); eq(A.Estimate(product).unitProfit,5400)
+    product.fee = 8; recipe.materials[1].source = "fixed"; recipe.materials[1].price = 1000
+    local original = A.Logic.Copy(product)
+    assert(A.AddRecipeScan(900)); eq(#A.profile.products,1); eq(#product.recipes,1)
+    eq(product.fee,original.fee); eq(recipe.materials[1].price,1000)
+    scanFixture(); assert(A.UI.ScanProfession())
+    eq(table.concat(A.Market.queue,","),"1,3")
+    completeScan({[1]=10000,[3]=100})
+    eq(A.scanResults[900].estimate.unitProfit,7100)
+    eq(recipe.materials[1].price,1000)
+end)
+
+test("temporary unmonitored items retry once and can recover without saving configuration", function()
+    scanFixture(902,5)
+    local send, attempts = C_AuctionHouse.SendSearchQuery, 0
+    C_AuctionHouse.SendSearchQuery = function(key,...)
+        if key.itemID == 5 then
+            attempts = attempts+1
+            if attempts == 1 then error("temporary failure") end
+        end
+        return send(key,...)
+    end
+    local count = #A.profile.products
+    assert(A.UI.ScanProfession()); completeScan({[5]=9000,[2]=2000,[3]=100})
+    C_AuctionHouse.SendSearchQuery = send
+    eq(attempts,2); eq(A.scanResults[902].refreshError,nil)
+    eq(A.scanResults[902].estimate.unitProfit,4450); eq(#A.profile.products,count)
+end)
+
+test("failed or throttled rescans retain an entire old result instead of mixing prices", function()
+    scanFixture(902,5)
+    local old = A.scanResults[902]
+    local send = C_AuctionHouse.SendSearchQuery
+    C_AuctionHouse.SendSearchQuery = function(key,...)
+        if key.itemID == 5 then error("still unavailable") end
+        return send(key,...)
+    end
+    assert(A.UI.ScanProfession()); completeScan({[2]=100,[3]=1})
+    C_AuctionHouse.SendSearchQuery = send
+    eq(A.scanResults[902],old); eq(old.estimate.unitProfit,4450); assert(old.refreshError)
+    scanFixture(902,5); assert(A.UI.ScanProfession())
+    MOCK.ready = false; A.Market.Tick(); MOCK.time = MOCK.time+31; A.Market.Tick()
+    eq(#A.Market.queue,0); eq(A.Market.active,nil); assert(A.Market.batch.stopped)
+    eq(A.scanResults[902],old); assert(old.refreshError:find("30")); eq(old.estimate.unitProfit,4450)
+    MOCK.ready = true
+end)
+
+test("a missing response has bounded retries and no invented initial profit", function()
+    scanFixture(904,5); assert(A.UI.ScanProfession())
+    for _ = 1, 20 do A.Market.Tick(); MOCK.time = MOCK.time+26 end
+    A.Market.Tick()
+    eq(A.Market.active,nil); eq(#A.Market.queue,0); eq(A.Market.batch.failed,3)
+    eq(A.scanResults[904].at,nil); eq(A.scanResults[904].estimate.unitProfit,nil)
+    assert(A.scanResults[904].refreshError)
+    for _, attempts in pairs(A.Market.batch.attempts) do eq(attempts,2) end
+end)
+
+test("scan handoff drains a monitor request and never runs auto refresh behind the scan page", function()
+    scanFixture(905,5); ProfessionsFrame:Hide(); A.Native.ShowMonitor(); MOCK.flush()
+    A.Market.auto = true; A.Market.Tick(); assert(A.Market.active)
+    local oldItem = A.Market.active.itemID
+    ProfessionsFrame:Show(); assert(A.UI.ScanProfession()); assert(A.Market.draining)
+    local queries = #MOCK.queries
+    A.Market.Tick(); eq(#MOCK.queries,queries)
+    event("COMMODITY_SEARCH_RESULTS_UPDATED",oldItem)
+    eq(A.Market.draining,nil); eq(next(A.Market.batch.scan.quotes),nil)
+    completeScan({[5]=9000,[2]=2000,[3]=100})
+    queries = #MOCK.queries; MOCK.time = MOCK.time+60; A.Market.Tick()
+    eq(#MOCK.queries,queries)
+    ProfessionsFrame:Hide(); A.Market.Tick(); assert(#MOCK.queries>queries)
+    A.Market.auto = false; A.Market.Pause()
+end)
+
+test("scan costs use purchase depth exclude own stock and honor vendor prices and minimum output", function()
+    scanFixture(910,5)
+    schematic.quantityMin, schematic.quantityMax = 2,4
+    A.profile.vendorPrices[3] = {price=50,stackCount=5,seenAt=GetServerTime()}
+    assert(A.UI.ScanProfession()); eq(table.concat(A.Market.queue,","),"5,2")
+    local levels = {{unitPrice=1000,quantity=5,numOwnerItems=5},
+        {unitPrice=1500,quantity=1,numOwnerItems=0},{unitPrice=2000,quantity=1,numOwnerItems=0}}
+    completeScan({[5]=10000,[2]=levels})
+    local record = A.scanResults[910]
+    eq(record.draft.output,2); eq(record.estimate.materialCost,3510)
+    eq(record.estimate.unitProfit,7745); eq(record.estimate.materials[2].source,"vendor")
+    A.profile.vendorPrices[3].price = 500
+    eq(record.estimate.materialCost,3510)
+    scanFixture(910,5); assert(A.UI.ScanProfession())
+    completeScan({[5]=10000,[2]={{unitPrice=1500,quantity=1,numOwnerItems=0}}})
+    eq(A.scanResults[910].estimate.unitProfit,nil); assert(A.scanResults[910].estimate.error:find("不足"))
+end)
+
+test("adding another source recipe preserves existing product fee alert and manual material prices", function()
+    scanFixture(911,1); assert(A.UI.ScanProfession()); completeScan({[1]=10000,[2]=2000,[3]=100})
+    local product = A.profile.products[1]
+    local firstRecipe = product.recipes[1]
+    product.alert = false
+    assert(A.AddRecipeScan(911)); product = A.Selected()
+    eq(#product.recipes,2); eq(product.fee,8); eq(product.alert,false)
+    eq(product.recipes[1].materials[1].price,firstRecipe.materials[1].price)
+    assert(A.AddRecipeScan(911)); eq(#A.Selected().recipes,2)
+end)
+
+test("invalid profession states cannot scan and unsupported equipment cannot fabricate results", function()
+    scanFixture(912,5); ProfessionsFrame:Hide()
+    local queries = #MOCK.queries
+    eq(A.UI.ScanProfession(),nil); eq(#MOCK.queries,queries)
+    ProfessionsFrame:Show(); ProfessionsFrame.CraftingPage:Hide()
+    eq(A.UI.ScanProfession(),nil); eq(#MOCK.queries,queries)
+    ProfessionsFrame.CraftingPage:Show(); selectedRecipe.supportsQualities = true
+    eq(A.UI.ScanProfession(),nil); eq(A.scanResults[912],nil)
+    selectedRecipe.supportsQualities = nil; A.open = false
+    eq(A.UI.ScanProfession(),nil); A.open = true
+    MOCK.keyInfo = {isEquipment=true}
+    assert(A.UI.ScanProfession()); completeScan({})
+    eq(A.scanResults[912].estimate.unitProfit,nil)
+    for _, attempts in pairs(A.Market.batch.attempts) do eq(attempts,1) end
+    MOCK.keyInfo = nil
+end)
+
+test("native scan button operates through AH navigation without recipe persistence", function()
+    scanFixture(913,4)
+    A.Native.Navigate("buy"); eq(A.UI.frame:IsShown(),false)
+    A.UI.profession.current:Click(); assert(A.Market.batch.scan); eq(A.UI.frame:IsShown(),true)
+    A.Market.Tick(); A.Native.Navigate("buy")
+    eq(A.Market.active,nil); eq(#A.Market.queue,0); assert(A.scanResults[913].refreshError)
+    A.UI.profession.current:Click(); eq(A.UI.frame:IsShown(),true); assert(A.Market.draining)
+    event("COMMODITY_SEARCH_RESULTS_UPDATED",4); eq(A.Market.draining,nil)
+    local batch = A.Market.batch
+    eq(A.UI.ScanProfession(),nil); eq(A.Market.batch,batch)
+    completeScan({[4]=20000,[2]=2000,[3]=100})
+    eq(A.UI.profession.page.RecipeList.ScrollBox.rows[1].auctionPilotRecipeID,913)
+    assert(A.UI.profession.profit:GetText() ~= "--")
+    local saved = A.scanResults[913]
+    A.AcceptQuote(4,A.Logic.Snapshot({{price=50000,quantity=100}},MOCK.time,true))
+    eq(A.scanResults[913],saved); eq(saved.estimate.sale,20000)
+    ProfessionsFrame:Hide(); ProfessionsFrame:Show(); A.UI.RefreshProfessionScan(); eq(A.scanResults[913],saved)
+end)
+
+test("reopened native scan history ages without issuing queries", function()
+    scanFixture(914,4); assert(A.UI.ScanProfession()); completeScan({[4]=10000,[2]=2000,[3]=100})
+    assert(not A.UI.profession.time:GetText():find("历史"))
+    ProfessionsFrame:Hide(); local queries = #MOCK.queries
+    MOCK.time = MOCK.time+121; ProfessionsFrame:Show()
+    for _, tick in ipairs(MOCK.tickers) do for _ = 1,4 do tick() end end
+    assert(A.UI.profession.time:GetText():find("历史")); eq(#MOCK.queries,queries)
+end)
+
+test("a scanned craft joins an existing resale product without inheriting or overwriting its purchase plan", function()
+    while #A.profile.products > 0 do A.DeleteProduct(A.profile.products[1].id) end
+    assert(A.SaveProduct({itemID=1,recipeName="原有单品转售",output=1,fee=5,extra=20,alert=false,
+        materials={},purchase={source="fixed",price=1000}}))
+    local productID, resaleID = A.Selected().id, A.SelectedRecipe().id
+    scanFixture(920,1); assert(A.UI.ScanProfession())
+    completeScan({[1]=12000,[2]=4000,[3]=100})
+    local record = A.scanResults[920]
+    eq(record.draft.purchase,nil); eq(record.draft.extra,0)
+    eq(record.draft.materials[1].source,"market"); eq(record.estimate.unitProfit,3300)
+    A.UI.profession.add:Click()
+    local product, craft = A.Product(productID), A.SelectedRecipe()
+    eq(#A.profile.products,1); eq(#product.recipes,2); eq(product.alert,false)
+    eq(craft.sourceRecipeID,920); eq(craft.purchase,nil)
+    A.Select(productID,resaleID)
+    eq(A.SelectedRecipe().purchase.price,1000); eq(A.SelectedRecipe().extra,20)
+    eq(A.Estimate(product).unitProfit,10380)
+    assert(A.AddRecipeScan(920)); eq(#A.Product(productID).recipes,2)
+    eq(A.Estimate(A.Selected()).unitProfit,3300)
+    MOCK.combinedProductID, MOCK.combinedResaleID = productID, resaleID
+end)
+
+test("resale edits and merchant updates do not change a completed craft scan snapshot", function()
+    local product = A.Product(MOCK.combinedProductID)
+    A.Select(product.id,MOCK.combinedResaleID)
+    ProfessionsFrame:Hide(); A.Editor.Open(product)
+    eq(A.Editor.resale,true)
+    A.Editor.purchase.price:SetCopper(2000)
+    local draft = A.Editor.Read(); assert(A.SaveProduct(draft)); A.Editor.Close()
+    local record = A.scanResults[920]
+    A.profile.vendorPrices[2] = {price=1,stackCount=1,seenAt=GetServerTime(),numAvailable=0,stockSeenAt=GetServerTime()}
+    A.AcceptQuote(1,A.Logic.Snapshot({{price=90000,quantity=100}},MOCK.time+1,true))
+    ProfessionsFrame:Show(); A.UI.RefreshProfessionScan()
+    eq(record.estimate.unitProfit,3300); eq(record.draft.materials[1].source,"market")
+    eq(A.Product(product.id).recipes[1].purchase.price,2000)
+    eq(A.Product(product.id).recipes[2].materials[1].quantity,2)
+end)
+
+test("a new Lua session clears scan results while preserving explicitly saved watches", function()
+    local savedCount, database = #A.profile.products, AuctionPilotDB
+    local reloaded = {}
+    for _, name in ipairs({"Logic.lua","Core.lua","History.lua","Market.lua","Native.lua","Widgets.lua","Editor.lua","UI.lua"}) do
+        assert(loadfile(PROJECT_ROOT .. "/AuctionPilot/" .. name))("AuctionPilot",reloaded)
+    end
+    reloaded.Initialize()
+    eq(AuctionPilotDB,database); eq(#reloaded.profile.products,savedCount)
+    eq(next(reloaded.scanResults),nil); eq(reloaded.profile.scanResults,nil)
+    eq(next(reloaded.quotes),nil)
+    local product = reloaded.Product(MOCK.combinedProductID)
+    eq(product.recipes[1].purchase.price,2000)
+    eq(product.recipes[2].sourceRecipeID,920); eq(#product.recipes[2].materials,2)
 end)
 
 MOCK.addon = A
