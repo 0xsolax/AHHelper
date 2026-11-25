@@ -47,6 +47,10 @@ local function recordChannel(id)
     channelTimes[id] = {seconds=(endMS - startMS) / 1000, haste=currentHaste()}
 end
 
+local function formatScore(score)
+    return score > 0 and score < 0.005 and "<0.01" or string.format("%.2f", score)
+end
+
 local function estimate(id, data, info)
     if info.isPassive then return reasons.not_applicable end
     local spell = C_Spell.GetSpellInfo(id)
@@ -66,7 +70,7 @@ local function estimate(id, data, info)
         end
     end
     local description = #descriptions > 0 and table.concat(descriptions, "\n") or C_Spell.GetSpellDescription(id)
-    local effects, reason, seconds, kind = L.Effects(description, GetLocale())
+    local effects, reason, seconds, kind, lower, upper = L.Effects(description, GetLocale(), A.Settings.ShowsRange())
     if not effects then return reasons[reason] or reasons.unsupported end
     local haste = currentHaste()
     local measured = kind == "penance" and channelTimes[id]
@@ -87,14 +91,28 @@ local function estimate(id, data, info)
             gcdMS = math.max(math.min(gcdMS, 1000), math.min(gcdMS, 1500, gcdMS / (1 + haste / 100)))
         end
     end
+    local weight = A.Settings.GetWeight()
+    local function scoreFor(effect)
+        return L.Score(effect, mana, spell.castTime, gcdMS, channelled, channelSeconds or seconds, weight)
+    end
+
     local parts = {}
     for _, style in ipairs(effectStyles) do
         local effect = effects[style[1]]
         if effect then
-            local score, failure = L.Score(effect, mana, spell.castTime, gcdMS, channelled,
-                channelSeconds or seconds, A.Settings.GetWeight())
+            local score, failure = scoreFor(effect)
             if not score then return reasons[failure] or reasons.unsupported end
-            local value = score < 0.005 and "<0.01" or string.format("%.2f", score)
+            local value = formatScore(score)
+            local minEffect = lower and lower[style[1]]
+            local maxEffect = upper and upper[style[1]]
+            if minEffect and maxEffect and minEffect < maxEffect then
+                local minScore = minEffect == 0 and 0 or scoreFor(minEffect)
+                local maxScore = scoreFor(maxEffect)
+                if minScore and maxScore then
+                    local lo, hi = formatScore(minScore), formatScore(maxScore)
+                    value = lo == hi and lo or lo .. "–" .. hi
+                end
+            end
             parts[#parts + 1] = style[3] .. style[2] .. " " .. value .. "|r"
         end
     end

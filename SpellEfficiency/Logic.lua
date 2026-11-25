@@ -24,7 +24,7 @@ local function plain(text)
     return text:lower()
 end
 
-local function normalize(text)
+local function normalize(text, rangeMode)
     text = plain(text)
     if not text or text == "" then return nil, "missing" end
     if text:find("$", 1, true) then return nil, "unsupported" end
@@ -33,14 +33,24 @@ local function normalize(text)
     for _, separator in ipairs({"至", "到", "~", "～", "–", "—", "to"}) do
         text = text:gsub("(%d)%s*" .. separator .. "%s*(%d)", "%1-%2")
     end
-    local invalid = false
-    text = text:gsub(number .. "%s*%-%s*" .. number, function(low, high)
+    local invalid, hasRange = false, false
+    text = text:gsub(number .. "%s*%-%s*" .. number .. "()", function(low, high, after)
         low, high = tonumber(low), tonumber(high)
         if not L.Number(low) or not L.Number(high) or low > high then invalid = true; return "?" end
-        return string.format("%.6f", low / 2 + high / 2):gsub("0+$", ""):gsub("%.$", "")
+        local value = low / 2 + high / 2
+        if rangeMode and low < high then
+            local suffix = text:sub(after)
+            -- Keep the same durations and tick intervals for both bounds.
+            if not suffix:match("^%s*秒") and not suffix:match("^%s*sec") then
+                hasRange = true
+                if rangeMode == "lower" then value = low
+                elseif rangeMode == "upper" then value = high end
+            end
+        end
+        return string.format("%.6f", value):gsub("0+$", ""):gsub("%.$", "")
     end)
     if invalid then return nil, "unsupported" end
-    return text
+    return text, nil, hasRange
 end
 
 local durationPatterns = {
@@ -166,10 +176,15 @@ local function damageHealing(clause, chinese, values)
     return nil, related
 end
 
-function L.Effects(description, locale)
-    if locale ~= "zhCN" and locale ~= "enUS" and locale ~= "enGB" then return nil, "locale" end
-    local text, reason = normalize(description)
-    if not text then return nil, reason end
+local function validAmount(value, allowZero)
+    return L.Number(value) and (value > 0 or allowZero)
+end
+
+local function parseEffects(text, locale, allowZero)
+    if locale == "zhCN" then
+        -- Some direct heals describe the amount of damage healed.
+        text = text:gsub("治%s*疗%s*" .. number .. "%s*点%s*伤%s*害", "治疗%1点生命值")
+    end
     for _, word in ipairs({"复活", "复生", "resurrect"}) do
         if text:find(word, 1, true) then return nil, "not_applicable" end
     end
@@ -199,7 +214,7 @@ function L.Effects(description, locale)
         local damage, healing, seconds, period = volley:match(pattern)
         if locale ~= "zhCN" then seconds, period = period, seconds end
         damage, healing, seconds, period = tonumber(damage), tonumber(healing), tonumber(seconds), tonumber(period)
-        if not L.Number(damage) or damage <= 0 or not L.Number(healing) or healing <= 0
+        if not validAmount(damage, allowZero) or not validAmount(healing, allowZero)
             or not L.Number(seconds) or seconds <= 0 or not L.Number(period) or period <= 0 then
             return nil, "unsupported"
         end
@@ -227,7 +242,7 @@ function L.Effects(description, locale)
         end
         local ratio, related = damageHealing(clause, locale == "zhCN", values)
         if related then
-            if not L.Number(ratio) or ratio <= 0 or healingRatio then return nil, "unsupported" end
+            if not validAmount(ratio, allowZero) or healingRatio then return nil, "unsupported" end
             healingRatio = ratio
             values = {}
         end
@@ -261,7 +276,7 @@ function L.Effects(description, locale)
     -- Preserve every effect category; damage, healing and absorption are never added together.
     if next(totals) then
         for _, amount in pairs(totals) do
-            if not L.Number(amount) or amount <= 0 then return nil, "unsupported" end
+            if not validAmount(amount, allowZero) then return nil, "unsupported" end
         end
         return totals, nil, fullDuration
     end
@@ -271,17 +286,34 @@ function L.Effects(description, locale)
     return nil, "not_applicable"
 end
 
-function L.ManaCost(costs)
+function L.Effects(description, locale, showRange)
+    if locale ~= "zhCN" and locale ~= "enUS" and locale ~= "enGB" then return nil, "locale" end
+    local text, reason, hasRange = normalize(description, showRange and "mean")
+    if not text then return nil, reason end
+    if not hasRange then return parseEffects(text, locale) end
+
+    local effects, failure, seconds, kind = parseEffects(text, locale)
+    if not effects then return nil, failure end
+    local lower = parseEffects(normalize(description, "lower"), locale, true)
+    local upper = parseEffects(normalize(description, "upper"), locale, true)
+    return effects, nil, seconds, kind, lower, upper
+end
+
+-- The regen timer only needs the initial mana charge, even when a spell has other costs.
+function L.ManaCost(costs, upfrontOnly)
     if type(costs) ~= "table" or not L.Readable(costs) then return end
     local base, aura, baseCount, auraCount = nil, nil, 0, 0
     local nonMana = false
     for _, cost in ipairs(costs) do
-        if type(cost) ~= "table" or not L.Number(cost.type) or cost.type % 1 ~= 0 then return end
+        if not L.Readable(cost) or type(cost) ~= "table" then return end
+        local power = cost.type
+        if not L.Readable(power) or type(power) ~= "number" or power % 1 ~= 0 then return end
+        if not upfrontOnly and power < 0 then return end
         if not L.Readable(cost.requiredAuraID) or not L.Readable(cost.hasRequiredAura) then return end
         local required = cost.requiredAuraID and cost.requiredAuraID ~= 0
         if not required or cost.hasRequiredAura then
-            if cost.type == 0 then
-                if not L.Number(cost.cost) or (cost.costPerSec ~= nil
+            if power == 0 then
+                if not L.Number(cost.cost) or (not upfrontOnly and cost.costPerSec ~= nil
                     and (not L.Number(cost.costPerSec) or cost.costPerSec ~= 0)) then return end
                 if required then aura, auraCount = cost.cost, auraCount + 1
                 else base, baseCount = cost.cost, baseCount + 1 end
@@ -290,7 +322,7 @@ function L.ManaCost(costs)
             end
         end
     end
-    if nonMana then return nil, "not_applicable" end
+    if nonMana and not upfrontOnly then return nil, "not_applicable" end
     if auraCount == 1 then return aura end
     if auraCount == 0 and baseCount == 1 then return base end
 end
