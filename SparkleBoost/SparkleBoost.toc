@@ -1,0 +1,12 @@
+## Interface: 16001
+## Title: 拾光 SparkleBoost
+## Notes: 任务物品闪光保持、附近互动目标的可调星光、光柱与光圈。
+## Author: Sola
+## Version: 0.1.1-test
+## SavedVariablesPerCharacter: SparkleBoostDB
+## OptionalDeps: ForeverLootSparkles, ForeverLootSparkles_Coloring, Lueur
+
+Core.lua
+Effects.lua
+Engine.lua
+Options.lua
