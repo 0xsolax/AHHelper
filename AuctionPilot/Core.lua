@@ -1,7 +1,8 @@
 local addonName, A = ...
 A.name = addonName
-A.version = "0.8.1-test"
+A.version = "0.12.2-test"
 A.quotes, A.alerts, A.noticeAt = {}, {}, {}
+A.scanResults = {}
 A.ttl = 120
 A.open = false
 
@@ -38,16 +39,6 @@ function A.SelectedRecipe(product)
     end
 end
 
--- Keep the merchant cache bounded by the saved watchlist, including alternate recipes.
-function A.PruneVendorPrices()
-    local tracked = A.Logic.TrackedItems(A.profile.products)
-    if type(A.profile.vendorPrices) ~= "table" then A.profile.vendorPrices = {} end
-    for id in pairs(A.profile.vendorPrices) do
-        if not tracked[id] then A.profile.vendorPrices[id] = nil end
-    end
-    return tracked
-end
-
 local function pruneQuotes(tracked)
     for itemID in pairs(A.quotes) do
         if not tracked[itemID] then A.quotes[itemID] = nil end
@@ -74,13 +65,13 @@ function A.SaveProduct(draft)
     local valid, err = A.Logic.Validate(draft)
     if not valid then return nil, err end
     local name = type(draft.recipeName) == "string" and draft.recipeName:match("^%s*(.-)%s*$") or ""
-    if name == "" or #name > 120 then return nil, "请填写简短的配方名称。" end
+    if name == "" or #name > 120 then return nil, "请填写简短的方案名称。" end
     local existing = draft.id and A.Product(draft.id)
     if draft.id and not existing then return nil, "商品已不存在，请重新打开编辑。" end
     if existing and existing.itemID ~= draft.itemID then return nil, "已有产品的成品不能更换，请另添产品。" end
     for _, other in ipairs(A.profile.products) do
         if other.itemID == draft.itemID and other.id ~= draft.id then
-            return nil, "该商品已在列表，请使用它的「添加配方」。"
+            return nil, "该商品已在列表，请使用它的「添加方案」。"
         end
     end
     local product = existing and A.Logic.Copy(existing)
@@ -88,12 +79,16 @@ function A.SaveProduct(draft)
     local targetIndex
     for index, recipe in ipairs(product.recipes) do
         if recipe.id == draft.recipeID then targetIndex = index
-        elseif recipe.name == name then return nil, "这个产品已有同名配方，请换个名称。" end
+        elseif recipe.name == name then return nil, "这个产品已有同名方案，请换个名称。" end
     end
     if draft.recipeID and not targetIndex then return nil, "配方已不存在，请重新打开编辑。" end
     local recipe = { id = draft.recipeID or product.nextRecipeID, name = name, output = draft.output,
         extra = draft.extra, materials = A.Logic.Copy(draft.materials), sourceRecipeID = draft.sourceRecipeID,
         sourceOutputMin = draft.sourceOutputMin, sourceOutputMax = draft.sourceOutputMax }
+    if draft.purchase then
+        recipe.purchase = A.Logic.Copy(draft.purchase)
+        recipe.sourceRecipeID, recipe.sourceOutputMin, recipe.sourceOutputMax = nil, nil, nil
+    end
     if targetIndex then product.recipes[targetIndex] = recipe
     else
         table.insert(product.recipes, recipe)
@@ -109,7 +104,7 @@ function A.SaveProduct(draft)
         table.insert(A.profile.products, product)
     end
     A.alerts[product.itemID] = nil
-    pruneQuotes(A.PruneVendorPrices())
+    pruneQuotes(A.Logic.TrackedItems(A.profile.products))
     A.Select(product.id, recipe.id)
     return true
 end
@@ -117,12 +112,12 @@ end
 function A.DeleteRecipe(productID, recipeID)
     local product = A.Product(productID)
     if not product then return nil, "商品已不存在。" end
-    if #product.recipes <= 1 then return nil, "至少保留一套配方，或移除整个产品。" end
+    if #product.recipes <= 1 then return nil, "至少保留一套方案，或移除整个产品。" end
     for i, recipe in ipairs(product.recipes) do
         if recipe.id == recipeID then
             table.remove(product.recipes, i)
             if product.activeRecipeID == recipeID then product.activeRecipeID = product.recipes[1].id end
-            pruneQuotes(A.PruneVendorPrices())
+            pruneQuotes(A.Logic.TrackedItems(A.profile.products))
             A.RefreshUI()
             return true
         end
@@ -141,7 +136,7 @@ function A.DeleteProduct(id)
     if A.profile.selectedID == id then
         A.profile.selectedID = A.profile.products[1] and A.profile.products[1].id or nil
     end
-    pruneQuotes(A.PruneVendorPrices())
+    pruneQuotes(A.Logic.TrackedItems(A.profile.products))
     A.RefreshUI()
 end
 
@@ -180,6 +175,7 @@ function A.AgeText(age)
 end
 
 function A.RecipeNote(recipe)
+    if recipe and recipe.purchase then return "单品转售 · 按每件进货价计算，无需配方" end
     if not recipe or not recipe.sourceRecipeID then return "手动配置" end
     local note = "读取自配方 #" .. recipe.sourceRecipeID
     if recipe.sourceOutputMin and recipe.sourceOutputMax and recipe.sourceOutputMax > recipe.sourceOutputMin then
@@ -187,6 +183,118 @@ function A.RecipeNote(recipe)
             .. (recipe.output == recipe.sourceOutputMin and "，按最低产量估算" or "，按自填产量估算")
     end
     return note
+end
+
+function A.VendorSourceText(entry)
+    local name = type(entry.merchantName) == "string" and entry.merchantName ~= "" and entry.merchantName
+    local location = type(entry.merchantLocation) == "string" and entry.merchantLocation ~= "" and entry.merchantLocation
+    if not name and not location then return "最低价商人：未记录" end
+    return "最低价商人：" .. (location or "地点未记录") .. " · " .. (name or "商人未记录")
+end
+
+function A.VendorStockText(itemID)
+    local entry = A.Logic.VendorPrice({itemID = itemID, source = "vendor"}, A.profile.vendorPrices)
+    if not entry then return "商店价未记录，保存监控后打开对应商店。" end
+    local stock = A.Logic.Number(entry.numAvailable, -1, 1000000000, true)
+    if stock == nil or not A.Logic.Number(entry.stockSeenAt, 1, 9007199254740991, true) then
+        return "历史商店库存未记录。"
+    end
+    return "历史商店库存：" .. (stock == -1 and "不限量" or stock == 0 and "已售罄" or "限量 " .. stock .. " 件")
+        .. " · " .. date("%m-%d %H:%M", entry.stockSeenAt)
+end
+
+function A.ReadRecipeScan(recipeID)
+    local draft, err = A.Native.ReadRecipe(recipeID)
+    if not draft then return nil, err end
+    for _, product in ipairs(A.profile.products) do
+        if product.itemID == draft.itemID then
+            draft.fee, draft.alert = product.fee, product.alert
+            for _, recipe in ipairs(product.recipes) do
+                if recipe.sourceRecipeID == draft.sourceRecipeID then
+                    draft.extra = recipe.extra
+                    for _, material in ipairs(draft.materials) do
+                        for _, saved in ipairs(recipe.materials) do
+                            if saved.itemID == material.itemID then
+                                material.source, material.price = saved.source, saved.price
+                            end
+                        end
+                    end
+                    break
+                end
+            end
+            break
+        end
+    end
+    return draft
+end
+
+-- These snapshots belong to this Lua session, never to AuctionPilotDB.
+function A.FinishRecipeScan(batch, reason)
+    local scan = batch and batch.scan
+    if not scan or scan.done then return end
+    local allDone = true
+    for _, draft in ipairs(scan.drafts) do
+        local id = draft.sourceRecipeID
+        if not scan.finished[id] then
+            local quotes, ready, failure = {}, true, reason
+            local function include(itemID)
+                if scan.quotes[itemID] then quotes[itemID] = scan.quotes[itemID]
+                elseif scan.errors[itemID] then failure = failure or scan.errors[itemID]
+                else ready = false end
+            end
+            include(draft.itemID)
+            for _, material in ipairs(draft.materials) do
+                if A.Logic.UsesMarketPrice(material, scan.vendorPrices) then include(material.itemID) end
+            end
+            if reason or ready then
+                scan.finished[id] = true
+                local previous = A.scanResults[id]
+                if failure and previous then
+                    previous.refreshError, previous.historical = failure, true
+                else
+                    local estimate = failure and {error = failure, materials = {}}
+                        or A.Logic.Estimate(draft, quotes, A.Now(), math.huge, nil, nil, scan.vendorPrices, true)
+                    local at
+                    for _, quote in pairs(quotes) do at = at and math.min(at, quote.at) or quote.at end
+                    A.scanResults[id] = {draft = A.Logic.Copy(draft), estimate = estimate,
+                        quotes = A.Logic.Copy(quotes), at = not failure and at or nil,
+                        seenAt = not failure and at and GetServerTime() - math.floor(A.Now() - at) or nil,
+                        refreshError = failure}
+                end
+            else allDone = false end
+        end
+    end
+    scan.done = allDone
+end
+
+function A.AddRecipeScan(id)
+    local record = A.scanResults[id]
+    if not record then return nil, "请先扫描一个配方。" end
+    local draft = A.Logic.Copy(record.draft)
+    for _, product in ipairs(A.profile.products) do
+        if product.itemID == draft.itemID then
+            for _, recipe in ipairs(product.recipes) do
+                if recipe.sourceRecipeID == draft.sourceRecipeID then
+                    A.Select(product.id, recipe.id)
+                    return true
+                end
+            end
+            draft.id, draft.fee, draft.alert = product.id, product.fee, product.alert
+            break
+        end
+    end
+    local ok, err = A.SaveProduct(draft)
+    if not ok then return nil, err end
+    -- Preserve sample times; joining the watchlist is not another market observation.
+    for itemID, quote in pairs(record.quotes) do
+        local old = A.quotes[itemID]
+        if not old or not old.complete or old.at < quote.at then
+            A.quotes[itemID] = A.Logic.Copy(quote)
+            A.quotes[itemID].historical = not A.open or record.historical or record.refreshError ~= nil
+        end
+    end
+    A.RefreshUI()
+    return true
 end
 
 function A.AlertText(alert)
@@ -242,9 +350,12 @@ function A.Initialize()
         AuctionPilotDB.profiles[key] = profile
     end
     A.profile = profile
-    pruneQuotes(A.PruneVendorPrices())
+    -- Recorded purchase prices survive watchlist changes and session resets.
+    if type(profile.vendorPrices) ~= "table" then profile.vendorPrices = {} end
+    pruneQuotes(A.Logic.TrackedItems(profile.products))
     A.History.Initialize()
     A.UI.Build()
+    A.Native.InstallProfessionScan()
     A.Widgets.InstallItemLinks()
     A.Market.StartTicker()
 end
@@ -258,7 +369,9 @@ for _, event in ipairs({ "ADDON_LOADED", "PLAYER_LOGIN", "AUCTION_HOUSE_SHOW", "
     "ITEM_SEARCH_RESULTS_UPDATED", "ITEM_SEARCH_RESULTS_ADDED", "BAG_UPDATE_DELAYED",
     "GET_ITEM_INFO_RECEIVED", "ITEM_DATA_LOAD_RESULT", "AUCTION_HOUSE_AUCTION_CREATED",
     "AUCTION_HOUSE_THROTTLED_SYSTEM_READY", "AUCTION_HOUSE_SHOW_ERROR",
-    "PLAYER_MONEY", "PLAYER_REGEN_DISABLED", "PLAYER_REGEN_ENABLED", "MERCHANT_SHOW", "MERCHANT_UPDATE" }) do
+    "PLAYER_MONEY", "PLAYER_REGEN_DISABLED", "PLAYER_REGEN_ENABLED", "MERCHANT_SHOW", "MERCHANT_UPDATE",
+    "TRADE_SKILL_SHOW", "TRADE_SKILL_CLOSE", "TRADE_SKILL_DATA_SOURCE_CHANGING",
+    "TRADE_SKILL_DATA_SOURCE_CHANGED", "TRADE_SKILL_LIST_UPDATE", "TRADE_SKILL_FAVORITES_CHANGED" }) do
     events:RegisterEvent(event)
 end
 events:SetScript("OnEvent", function(_, event, ...)
@@ -275,11 +388,13 @@ events:SetScript("OnEvent", function(_, event, ...)
     elseif event == "AUCTION_HOUSE_CLOSED" then
         A.open = false
         for _, quote in pairs(A.quotes) do quote.historical = true end
+        for _, record in pairs(A.scanResults) do record.historical = true end
         A.History.OnEvent(event)
         A.Market.auto = false
         A.Native.OnEvent(event)
         A.Market.Pause()
         if A.UI and A.UI.frame then A.UI.frame:Hide() end
+        A.RefreshUI()
     elseif A.profile then
         A.Native.OnEvent(event, ...)
         A.History.OnEvent(event, ...)

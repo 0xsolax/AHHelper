@@ -4,11 +4,50 @@ A.Editor = E
 local W = A.Widgets
 local sourceNames = {market = "自动", auction = "AH价", vendor = "商店价", fixed = "固定价"}
 
+local function dropdown(parent, width, callback)
+    local button = W.Button(parent, "", width, 26, function(owner)
+        if not MenuUtil or not MenuUtil.CreateContextMenu then E.error:SetText("菜单尚未载入，请重载界面后重试。"); return end
+        MenuUtil.CreateContextMenu(owner, callback)
+    end)
+    local label = button:GetFontString()
+    label:ClearAllPoints(); label:SetPoint("LEFT", 8, 0)
+    label:SetWidth(width - 26); label:SetJustifyH("LEFT"); label:SetWordWrap(false)
+    local arrow = button:CreateTexture(nil, "OVERLAY")
+    arrow:SetTexture("Interface\\ChatFrame\\UI-ChatIcon-ScrollDown-Up")
+    arrow:SetSize(16, 16); arrow:SetPoint("RIGHT", -1, 0)
+    return button
+end
+
+local function sourceButton(parent, row)
+    local button = dropdown(parent, 92, function(_, menu)
+        for _, key in ipairs({"market", "auction", "vendor", "fixed"}) do
+            local source = key
+            menu:CreateRadio(source == "market" and "自动（商店优先）" or sourceNames[source],
+                function() return row.source == source end, function()
+                    row.source = source; row.price:SetEnabled(source == "fixed"); E.Preview()
+                end)
+        end
+    end)
+    button:SetScript("OnEnter", function(owner)
+        GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
+        GameTooltip:SetText("自动：商店价优先，没有记录则用 AH。\nAH价：只用拍卖行报价。\n商店价：只用商店记录，缺价时等待采集。\n固定价：手动填写采购单价。")
+        GameTooltip:Show()
+    end)
+    button:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    return button
+end
+
 function E.Read()
     local draft = { id = E.id, itemID = E.item.itemID, output = tonumber(E.output:GetText()),
         recipeID = E.recipeID, recipeName = E.name:GetText(), fee = tonumber(E.fee:GetText()),
         extra = E.extra:GetCopper(), alert = E.alert:GetChecked(), materials = {}, sourceRecipeID = E.sourceRecipeID,
         sourceOutputMin = E.sourceOutputMin, sourceOutputMax = E.sourceOutputMax }
+    if E.resale then
+        draft.output = 1
+        draft.purchase = {source = E.purchase.source, price = E.purchase.price:GetCopper()}
+        draft.sourceRecipeID, draft.sourceOutputMin, draft.sourceOutputMax = nil, nil, nil
+        return draft
+    end
     for _, row in ipairs(E.rows) do
         if row:IsShown() then
             table.insert(draft.materials, { itemID = row.item.itemID, quantity = tonumber(row.quantity:GetText()),
@@ -18,19 +57,35 @@ function E.Read()
     return draft
 end
 
+function E.SetMode(resale)
+    E.resale = resale
+    E.modeButton:SetText(resale and "单品转售" or "配方制作")
+    for _, widget in ipairs(E.craftWidgets) do widget:SetShown(not resale) end
+    E.purchasePanel:SetShown(resale)
+    E.save:SetText(resale and "保存监控" or "保存配方")
+    E.extraLabel:SetText(resale and "额外费用 / 件" or "额外费用 / 次")
+    E.costLabel:SetText(resale and "总成本 / 件" or "总成本 / 次")
+    E.cutLabel:SetText(resale and "其中手续费 / 件" or "其中手续费 / 次")
+    E.grossLabel:SetText(resale and "销售额 / 件" or "销售总额 / 次")
+    if E.name:GetText() == "默认配方" and resale then E.name:SetText("单品转售")
+    elseif E.name:GetText() == "单品转售" and not resale then E.name:SetText("默认配方") end
+    E.Preview()
+end
+
 function E.Preview()
     if E.loading or not E.frame or not E.frame:IsShown() then return end
     local draft = E.Read()
     E.sourceNote:SetText(A.RecipeNote(draft))
     local estimate = A.EstimateInput(draft)
     local index = 0
-    for _, row in ipairs(E.rows) do
-        if row:IsShown() then
+    for _, row in ipairs(E.resale and {E.purchase} or E.rows) do
+        if E.resale or row:IsShown() then
             index = index + 1
             if row.source ~= "fixed" then row.price:SetCopper(estimate.materials[index] and estimate.materials[index].unit) end
             row.sourceButton:SetText(sourceNames[row.source] or "选择来源")
         end
     end
+    E.vendorStock:SetText(A.VendorStockText(draft.itemID))
     E.warning:SetText(estimate.error or (estimate.stale and "历史测算 · " or "")
         .. "行情 " .. A.AgeText(estimate.age) .. "；返回列表可手动刷新。")
     E.warning:SetTextColor(unpack((estimate.error or estimate.stale) and W.amber or W.muted))
@@ -65,33 +120,8 @@ function E.AddMaterial(material)
         row.item = W.ItemInput(row, 260, E.Preview); row.item:SetPoint("LEFT", 0, 0)
         row.quantity = W.Edit(row, 48, "1"); row.quantity:SetPoint("LEFT", 281, 0)
         row.quantity:SetScript("OnTextChanged", E.Preview)
-        row.sourceButton = W.Button(row, "自动", 92, 26, function(owner)
-            if not MenuUtil or not MenuUtil.CreateContextMenu then E.error:SetText("菜单尚未载入，请重载界面后重试。"); return end
-            MenuUtil.CreateContextMenu(owner, function(_, menu)
-                for _, key in ipairs({"market", "auction", "vendor", "fixed"}) do
-                    local source = key
-                    menu:CreateRadio(source == "market" and "自动（商店优先）" or sourceNames[source],
-                        function() return row.source == source end, function()
-                            row.source = source
-                            row.price:SetEnabled(source == "fixed")
-                            E.Preview()
-                        end)
-                end
-            end)
-        end)
+        row.sourceButton = sourceButton(row, row)
         row.sourceButton:SetPoint("LEFT", 346, 0)
-        local sourceText = row.sourceButton:GetFontString()
-        sourceText:ClearAllPoints(); sourceText:SetPoint("LEFT", 8, 0)
-        sourceText:SetWidth(66); sourceText:SetJustifyH("LEFT"); sourceText:SetWordWrap(false)
-        local arrow = row.sourceButton:CreateTexture(nil, "OVERLAY")
-        arrow:SetTexture("Interface\\ChatFrame\\UI-ChatIcon-ScrollDown-Up")
-        arrow:SetSize(16, 16); arrow:SetPoint("RIGHT", -1, 0)
-        row.sourceButton:SetScript("OnEnter", function(owner)
-            GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
-            GameTooltip:SetText("自动：商店价优先，没有记录则用 AH。\nAH价：只用拍卖行报价。\n商店价：只用商店记录，缺价时等待采集。\n固定价：手动填写采购单价。")
-            GameTooltip:Show()
-        end)
-        row.sourceButton:SetScript("OnLeave", function() GameTooltip:Hide() end)
         row.price = W.MoneyInput(row, E.Preview); row.price:SetPoint("LEFT", 444, 0)
         row.remove = W.Button(row, "移除", 40, 24, function() row:Hide(); E.ArrangeRows() end)
         row.remove:SetPoint("RIGHT", 0, 0)
@@ -119,10 +149,10 @@ function E.Open(product, recipe, adding)
     E.sourceOutputMin, E.sourceOutputMax = recipe and recipe.sourceOutputMin, recipe and recipe.sourceOutputMax
     A.UI.main:Hide()
     E.frame:Show()
-    E.title:SetText(recipe and "编辑配方" or product and "添加配方" or "添加产品与首个配方")
+    E.title:SetText(recipe and "编辑监控方案" or product and "添加方案" or "添加产品")
     E.item:SetItem(product and product.itemID)
     E.item:SetEnabled(product == nil)
-    E.name:SetText(recipe and recipe.name or product and ("配方" .. product.nextRecipeID) or "默认配方")
+    E.name:SetText(recipe and recipe.name or product and ("方案" .. product.nextRecipeID) or "默认配方")
     E.output:SetText(recipe and tostring(recipe.output) or "1")
     E.fee:SetText(product and tostring(product.fee) or "5")
     E.extra:SetCopper(recipe and recipe.extra or 0)
@@ -133,6 +163,10 @@ function E.Open(product, recipe, adding)
     for _, row in ipairs(E.rows) do row:Hide() end
     if recipe then for _, material in ipairs(recipe.materials) do E.AddMaterial(material) end
     else E.AddMaterial() end
+    E.purchase.source = recipe and recipe.purchase and recipe.purchase.source or "vendor"
+    E.purchase.price:SetCopper(recipe and recipe.purchase and recipe.purchase.price)
+    E.purchase.price:SetEnabled(E.purchase.source == "fixed")
+    E.SetMode(recipe ~= nil and recipe.purchase ~= nil)
     E.loading = false
     E.error:SetText("")
     E.Preview()
@@ -172,32 +206,47 @@ function E.Build(parent)
     frame:SetAllPoints(parent)
     E.frame = frame
     E.title = W.Label(frame, "添加监控", 0, 0, 24, W.gold)
-    W.Label(frame, "读取专业配方；或点击物品输入框后 Shift 点击物品填入", 0, 32, 13, W.muted)
+    E.modeButton = dropdown(frame, 154, function(_, menu)
+        menu:CreateRadio("配方制作", function() return not E.resale end, function() E.SetMode(false) end)
+        menu:CreateRadio("单品转售", function() return E.resale end, function() E.SetMode(true) end)
+    end); E.modeButton:SetPoint("TOPLEFT", 548, 0)
+    W.Label(frame, "选择监控类型；点击物品输入框后 Shift 点击物品填入", 0, 32, 13, W.muted)
     W.Label(frame, "出售商品", 8, 65, 14)
     E.item = W.ItemInput(frame, 348, E.Preview); E.item:SetPoint("TOPLEFT", 8, -87)
-    W.Label(frame, "配方名称", 400, 65, 14)
+    W.Label(frame, "方案名称", 400, 65, 14)
     E.name = W.Edit(frame, 160, "默认配方"); E.name:SetPoint("TOPLEFT", 406, -90)
     E.name:SetMaxLetters(32)
-    W.Label(frame, "每次产量", 590, 65, 14)
+    local outputLabel = W.Label(frame, "每次产量", 590, 65, 14)
     E.output = W.Edit(frame, 64, "1"); E.output:SetPoint("TOPLEFT", 596, -90)
     E.output:SetScript("OnTextChanged", E.Preview)
-    W.Label(frame, "件", 670, 96, 13, W.muted)
+    local outputUnit = W.Label(frame, "件", 670, 96, 13, W.muted)
     E.sourceNote = W.Label(frame, "手动配置", 8, 125, 12, W.muted, 520)
     E.import = W.Button(frame, "读取当前配方", 154, 26, E.ImportRecipe)
     E.import:SetPoint("TOPLEFT", 548, -119)
-    W.Label(frame, "采购材料", 8, 157, 18, W.gold)
-    W.Label(frame, "物品", 8, 188, 13, W.muted)
-    W.Label(frame, "用量", 286, 188, 13, W.muted)
-    W.Label(frame, "价格来源", 350, 188, 13, W.muted)
-    W.Label(frame, "采购单价", 458, 188, 13, W.muted)
+    E.craftWidgets = {outputLabel, outputUnit, E.output, E.import,
+        W.Label(frame, "采购材料", 8, 157, 18, W.gold),
+        W.Label(frame, "物品", 8, 188, 13, W.muted), W.Label(frame, "用量", 286, 188, 13, W.muted),
+        W.Label(frame, "价格来源", 350, 188, 13, W.muted), W.Label(frame, "采购单价", 458, 188, 13, W.muted)}
     E.scroll = W.Scroll(frame, 698, 180); E.scroll:SetPoint("TOPLEFT", 8, -210)
     local add = W.Button(frame, "+ 添加材料", 112, 26, function() E.AddMaterial() end)
     add:SetPoint("TOPLEFT", 8, -397)
+    table.insert(E.craftWidgets, E.scroll); table.insert(E.craftWidgets, add)
+    E.purchasePanel = W.Panel(frame, 698, 220); E.purchasePanel:SetPoint("TOPLEFT", 8, -157)
+    W.Label(E.purchasePanel, "单品进货", 16, 16, 18, W.gold)
+    W.Label(E.purchasePanel, "价格来源", 16, 64, 14, W.muted)
+    W.Label(E.purchasePanel, "进货单价 / 件", 286, 64, 14, W.muted)
+    E.purchase = {}
+    E.purchase.sourceButton = sourceButton(E.purchasePanel, E.purchase)
+    E.purchase.sourceButton:SetPoint("TOPLEFT", 106, -56)
+    E.purchase.price = W.MoneyInput(E.purchasePanel, E.Preview)
+    E.purchase.price:SetPoint("TOPLEFT", 418, -52)
+    E.vendorStock = W.Label(E.purchasePanel, "", 16, 112, 14, W.muted, 666)
+    W.Label(E.purchasePanel, "先保存监控，再打开商店记录最低买入价。\n仅遇到更低单价才更新；历史库存不代表当前有货。", 16, 152, 13, W.muted, 666)
     W.Label(frame, "产品费率", 8, 443, 14)
     E.fee = W.Edit(frame, 54, "5"); E.fee:SetPoint("TOPLEFT", 111, -434)
     E.fee:SetScript("OnTextChanged", E.Preview)
     W.Label(frame, "%", 174, 442, 14, W.muted)
-    W.Label(frame, "额外费用 / 次", 245, 443, 14)
+    E.extraLabel = W.Label(frame, "额外费用 / 次", 245, 443, 14)
     E.extra = W.MoneyInput(frame, E.Preview); E.extra:SetPoint("TOPLEFT", 364, -434)
     E.alert = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
     E.alert:SetSize(26, 26); E.alert:SetPoint("TOPLEFT", 4, -475)
@@ -205,41 +254,41 @@ function E.Build(parent)
     local preview = W.Panel(frame, 356, 458); preview:SetPoint("TOPRIGHT", 0, -56)
     W.Label(preview, "利润预览", 20, 20, 22, W.gold)
     local function previewRow(label, y)
-        W.Label(preview, label, 20, y, 14, W.muted)
+        local caption = W.Label(preview, label, 20, y, 14, W.muted)
         local value = W.Text(preview, "--", 16)
         value:SetPoint("TOPRIGHT", -20, -y); value:SetJustifyH("RIGHT")
-        return value
+        return value, caption
     end
     E.sale = previewRow("售价 / 件", 70)
-    E.cost = previewRow("总成本 / 次", 108)
-    E.cut = previewRow("其中手续费 / 次", 146)
-    E.gross = previewRow("销售总额 / 次", 203)
+    E.cost, E.costLabel = previewRow("总成本 / 次", 108)
+    E.cut, E.cutLabel = previewRow("其中手续费 / 次", 146)
+    E.gross, E.grossLabel = previewRow("销售总额 / 次", 203)
     E.profit = W.Label(preview, "-- / 件", 20, 259, 30, W.green, 316)
     E.roi = previewRow("总成本利润率", 320)
     E.warning = W.Label(preview, "", 20, 375, 13, W.muted, 316)
     E.error = W.Label(frame, "", 8, 515, 13, W.red, 700)
-    E.delete = W.Button(frame, "删除配方", 100, 30, function()
+    E.delete = W.Button(frame, "删除方案", 100, 30, function()
         StaticPopup_Show("AUCTIONPILOT_DELETE_RECIPE", nil, nil, { productID = E.id, recipeID = E.recipeID })
     end); E.delete:SetPoint("BOTTOMLEFT", 0, 0)
     E.removeProduct = W.Button(frame, "移除产品", 100, 30, function()
         StaticPopup_Show("AUCTIONPILOT_DELETE", nil, nil, E.id)
     end); E.removeProduct:SetPoint("BOTTOMLEFT", 112, 0)
     local cancel = W.Button(frame, "取消", 92, 32, E.Close); cancel:SetPoint("BOTTOMRIGHT", -166, 0)
-    local save = W.Button(frame, "保存配方", 150, 34, function()
+    E.save = W.Button(frame, "保存配方", 150, 34, function()
         local ok, err = A.SaveProduct(E.Read())
         if ok then E.Close() else E.error:SetText(err) end
-    end); save:SetPoint("BOTTOMRIGHT", 0, 0)
+    end); E.save:SetPoint("BOTTOMRIGHT", 0, 0)
     frame:Hide()
 end
 
 StaticPopupDialogs.AUCTIONPILOT_DELETE = {
-    text = "移除这个产品及全部配方？已上架的拍卖不会改变。", button1 = "移除", button2 = "取消",
+    text = "移除这个产品及全部方案？已上架的拍卖不会改变。", button1 = "移除", button2 = "取消",
     OnAccept = function(_, id) A.DeleteProduct(id); E.Close() end,
     timeout = 0, whileDead = true, hideOnEscape = true, preferredIndex = 3,
 }
 
 StaticPopupDialogs.AUCTIONPILOT_DELETE_RECIPE = {
-    text = "删除这套配方？其他配方和已上架的拍卖不会改变。", button1 = "删除", button2 = "取消",
+    text = "删除这套方案？其他方案和已上架的拍卖不会改变。", button1 = "删除", button2 = "取消",
     OnAccept = function(_, data)
         local ok, err = A.DeleteRecipe(data.productID, data.recipeID)
         if ok then E.Close() else E.error:SetText(err) end

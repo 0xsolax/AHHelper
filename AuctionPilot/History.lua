@@ -177,10 +177,63 @@ function H.OnEvent(event, arg)
     save(key.itemID, minimum)
 end
 
+local function addMaterialTooltip(tooltip, info, data)
+    local recipeID = L.Number(info.getterArgs and info.getterArgs[1], 1, 10000000, true)
+    local itemID = data and L.ItemID(data.id)
+    if not recipeID or not itemID or not A.Native.ProfessionVisible() then return end
+    local record, material, vendorTime = A.scanResults[recipeID]
+    if record then
+        for _, row in ipairs(record.estimate.materials) do
+            if row.itemID == itemID then material = row; break end
+        end
+    end
+    if not material then
+        local draft = record and record.draft or A.ReadRecipeScan(recipeID)
+        for _, input in ipairs(draft and draft.materials or {}) do
+            if input.itemID == itemID then
+                local vendor = L.VendorPrice(input, A.profile.vendorPrices)
+                if vendor then
+                    material = {source = "vendor", quantity = input.quantity, unit = vendor.price / vendor.stackCount,
+                        cost = math.ceil(vendor.price * input.quantity / vendor.stackCount),
+                        merchantName = vendor.merchantName, merchantLocation = vendor.merchantLocation}
+                    vendorTime = vendor.seenAt
+                elseif record then
+                    material = {source = input.source, error = "本次扫描未完成："
+                        .. (record.refreshError or record.estimate.error or "请重新扫描当前配方。")}
+                end
+                break
+            end
+        end
+    end
+    if not material then return end
+    local label = material.source == "vendor" and "商店最低价 / 件"
+        or material.source == "fixed" and "固定成本 / 件" or "AH采购均价 / 件"
+    tooltip:AddLine(" ")
+    if material.unit == nil or material.cost == nil then
+        tooltip:AddDoubleLine("拍卖助手 · " .. label, "未取得成本", .89,.75,.47, 1,.73,.28)
+        tooltip:AddLine(material.error or "请重新扫描当前配方。", 1,.73,.28, true)
+        return
+    end
+    local unit = material.unit
+    local unitText = unit > 0 and unit < 1 and "不足1铜"
+        or (unit % 1 ~= 0 and "约 " or "") .. L.Money(unit)
+    tooltip:AddDoubleLine("拍卖助手 · " .. label, unitText, .89,.75,.47, .91,.87,.77)
+    tooltip:AddDoubleLine("本配方 × " .. material.quantity, L.Money(material.cost), .61,.61,.57, .91,.87,.77)
+    if material.source == "vendor" then tooltip:AddLine(A.VendorSourceText(material), .61,.61,.57, true) end
+    if vendorTime then
+        tooltip:AddLine("商店记录 " .. date("%m-%d %H:%M", vendorTime), .61,.61,.57)
+    elseif record.seenAt then
+        tooltip:AddLine((record.historical and "上次扫描 " or "扫描 ") .. date("%H:%M:%S", record.seenAt)
+            .. (record.refreshError and " · 刷新失败，保留上次" or ""), .61,.61,.57)
+    end
+end
+
 function H.AddTooltip(tooltip, data)
     if tooltip ~= GameTooltip or not A.profile then return end
     local info = tooltip:GetProcessingTooltipInfo()
-    if not info or info ~= tooltip:GetPrimaryTooltipInfo() or info.append or info.getterName ~= "GetBagItem" then return end
+    if not info or info ~= tooltip:GetPrimaryTooltipInfo() or info.append then return end
+    if info.getterName == "GetRecipeReagentItem" then addMaterialTooltip(tooltip, info, data); return end
+    if info.getterName ~= "GetBagItem" then return end
     local bag = info.getterArgs and info.getterArgs[1]
     local lastBag = Enum.BagIndex and Enum.BagIndex.ReagentBag or NUM_BAG_SLOTS or 4
     if not L.Number(bag, 0, lastBag, true) then return end
