@@ -170,6 +170,10 @@ function L.Effects(description, locale)
     if locale ~= "zhCN" and locale ~= "enUS" and locale ~= "enGB" then return nil, "locale" end
     local text, reason = normalize(description)
     if not text then return nil, reason end
+    if locale == "zhCN" then
+        -- Some direct heals describe the amount of damage healed.
+        text = text:gsub("治%s*疗%s*" .. number .. "%s*点%s*伤%s*害", "治疗%1点生命值")
+    end
     for _, word in ipairs({"复活", "复生", "resurrect"}) do
         if text:find(word, 1, true) then return nil, "not_applicable" end
     end
@@ -271,17 +275,21 @@ function L.Effects(description, locale)
     return nil, "not_applicable"
 end
 
-function L.ManaCost(costs)
+-- The regen timer only needs the initial mana charge, even when a spell has other costs.
+function L.ManaCost(costs, upfrontOnly)
     if type(costs) ~= "table" or not L.Readable(costs) then return end
     local base, aura, baseCount, auraCount = nil, nil, 0, 0
     local nonMana = false
     for _, cost in ipairs(costs) do
-        if type(cost) ~= "table" or not L.Number(cost.type) or cost.type % 1 ~= 0 then return end
+        if not L.Readable(cost) or type(cost) ~= "table" then return end
+        local power = cost.type
+        if not L.Readable(power) or type(power) ~= "number" or power % 1 ~= 0 then return end
+        if not upfrontOnly and power < 0 then return end
         if not L.Readable(cost.requiredAuraID) or not L.Readable(cost.hasRequiredAura) then return end
         local required = cost.requiredAuraID and cost.requiredAuraID ~= 0
         if not required or cost.hasRequiredAura then
-            if cost.type == 0 then
-                if not L.Number(cost.cost) or (cost.costPerSec ~= nil
+            if power == 0 then
+                if not L.Number(cost.cost) or (not upfrontOnly and cost.costPerSec ~= nil
                     and (not L.Number(cost.costPerSec) or cost.costPerSec ~= 0)) then return end
                 if required then aura, auraCount = cost.cost, auraCount + 1
                 else base, baseCount = cost.cost, baseCount + 1 end
@@ -290,7 +298,7 @@ function L.ManaCost(costs)
             end
         end
     end
-    if nonMana then return nil, "not_applicable" end
+    if nonMana and not upfrontOnly then return nil, "not_applicable" end
     if auraCount == 1 then return aura end
     if auraCount == 0 and baseCount == 1 then return base end
 end

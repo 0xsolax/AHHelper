@@ -17,13 +17,20 @@ end
 local callbacks, frames, spells, books, queries = {}, {}, {}, {}, {}
 local playerClass, loggedIn, spellHaste = "PRIEST", false, 0
 local channel, channelReads = nil, 0
+local now, maxMana, manaReads, costReads = 0, 1000, 0, 0
 local secret = {}
 issecretvalue = function(value) return value == secret end
 GetLocale = function() return "zhCN" end
 UnitClass = function() return "牧师", playerClass end
 IsLoggedIn = function() return loggedIn end
 Enum = {TooltipDataType={Spell=1,Item=0}, TooltipDataLineType={SpellDescription=34},
-    SpellBookSpellBank={Player=0,Pet=1}, SpellBookItemType={Spell=1,FutureSpell=2}}
+    SpellBookSpellBank={Player=0,Pet=1}, SpellBookItemType={Spell=1,FutureSpell=2}, PowerType={Mana=0}}
+GetTime = function() return now end
+UnitPowerMax = function(unit, powerType)
+    eq(unit,"player"); eq(powerType,Enum.PowerType.Mana)
+    return maxMana
+end
+UnitPower = function() manaReads=manaReads+1; return secret end
 C_Spell = {
     GetSpellInfo=function(id)
         queries[#queries+1] = id
@@ -32,7 +39,12 @@ C_Spell = {
         return {spellID=id,name=s.name or "治疗术",castTime=s.cast}
     end,
     GetSpellDescription=function(id) return spells[id] and spells[id].description end,
-    GetSpellPowerCost=function(id) return spells[id] and spells[id].costs end,
+    GetSpellPowerCost=function(id)
+        costReads=costReads+1
+        local s=spells[id]
+        if s and s.costError then error("cost data unavailable") end
+        return s and s.costs
+    end,
 }
 C_SpellBook = {
     FindSpellBookSlotForSpell=function(id, hidden, flyouts, future, offspec)
@@ -50,14 +62,16 @@ UnitChannelInfo = function(unit)
     return "苦修","苦修",1,channel.startMS,channel.endMS,false,false,channel.id
 end
 CreateFrame = function(kind, name, parent, template)
-    local f = {events={},scripts={},name=name,parent=parent,shown=true,width=0,height=0,text=""}
+    local f = {events={},scripts={},kind=kind,name=name,parent=parent,shown=true,width=0,height=0,text=""}
     if name then _G[name]=f end
     function f:RegisterEvent(event) self.events[event]=true end
     function f:RegisterUnitEvent(event, unit) self.events[event]=unit end
     function f:UnregisterEvent(event) self.events[event]=nil end
+    function f:UnregisterAllEvents() self.events={} end
     function f:SetScript(event, fn) self.scripts[event]=fn end
     function f:SetSize(w,h) self.width=w; self.height=h end
     function f:SetWidth(w) self.width=w end
+    function f:SetHeight(h) self.height=h end
     function f:GetWidth() return self.width end
     function f:GetHeight() return self.height end
     function f:SetPoint(...) self.point={...} end
@@ -69,9 +83,17 @@ CreateFrame = function(kind, name, parent, template)
     function f:GetName() return self.name end
     function f:GetFrameLevel() return self.level or 1 end
     function f:SetFrameLevel(level) self.level=level end
+    function f:SetFrameStrata(strata) self.strata=strata end
+    function f:SetMovable(value) self.movable=value end
+    function f:EnableMouse(value) self.mouse=value end
+    function f:StartMoving() self.moving=true end
+    function f:StopMovingOrSizing() self.moving=false end
+    function f:SetUserPlaced(value) self.userPlaced=value end
+    function f:SetAlpha(value) self.alpha=value end
     function f:GetEffectiveScale() return self.scale or 1 end
     function f:GetCenter() return self.x or 200,self.y or 300 end
     function f:IsShown() return self.shown end
+    function f:IsVisible() return self.shown and (not self.parent or self.parent:IsVisible()) end
     function f:Show()
         local changed=not self.shown; self.shown=true
         if changed and self.scripts.OnShow then self.scripts.OnShow(self) end
@@ -80,14 +102,40 @@ CreateFrame = function(kind, name, parent, template)
         local changed=self.shown; self.shown=false
         if changed and self.scripts.OnHide then self.scripts.OnHide(self) end
     end
-    function f:Click(key) if self.scripts.OnClick then self.scripts.OnClick(self,key or "LeftButton") end end
+    function f:SetShown(shown) if shown then self:Show() else self:Hide() end end
+    function f:Click(key)
+        if kind=="CheckButton" then self:SetChecked(not self:GetChecked()) end
+        if self.scripts.OnClick then self.scripts.OnClick(self,key or "LeftButton") end
+    end
     function f:SetTexture(value) self.texture=value end
+    function f:SetTexCoord(...) self.texCoord={...} end
     function f:SetDesaturated(value) self.desaturated=value end
-    function f:CreateTexture() return CreateFrame("Texture",nil,self) end
+    function f:CreateTexture(name,layer,_,sublayer)
+        local frame=CreateFrame("Texture",name,self)
+        frame.layer=layer; frame.sublayer=sublayer
+        return frame
+    end
     function f:CreateFontString() return CreateFrame("FontString",nil,self) end
-    for _,method in ipairs({"SetBackdrop","SetBackdropColor","SetAllPoints","SetFrameStrata",
-        "SetMovable","EnableMouse","RegisterForDrag","StartMoving","StopMovingOrSizing",
-        "SetClampedToScreen","RegisterForClicks","SetHighlightTexture","SetTexCoord",
+    function f:CreateAnimationGroup()
+        local group={plays=0,playing=false}
+        function group:SetLooping(value) self.looping=value end
+        function group:Play() self.plays=self.plays+1; self.playing=true end
+        function group:Stop() self.playing=false end
+        function group:IsPlaying() return self.playing end
+        function group:CreateAnimation(animationType)
+            local animation={kind=animationType}
+            function animation:SetFromAlpha(value) self.from=value end
+            function animation:SetToAlpha(value) self.to=value end
+            function animation:SetDuration(value) self.duration=value end
+            function animation:SetSmoothing(value) self.smoothing=value end
+            self.animation=animation
+            return animation
+        end
+        self.animation=group
+        return group
+    end
+    for _,method in ipairs({"SetBackdrop","SetBackdropColor","SetAllPoints","RegisterForDrag",
+        "SetClampedToScreen","RegisterForClicks","SetHighlightTexture","SetBlendMode",
         "SetAutoFocus","SetMaxLetters","ClearFocus","SetJustifyH","SetTextColor"}) do
         f[method]=function() end
     end
@@ -530,6 +578,17 @@ test("a genuine zero GCD is not silently replaced by a positive default",functio
     local t=hover(1004); eq(last(t),"效率：时间未知")
     spells[1004].gcd=1500
 end)
+test("Greater Heal screenshot displays the range as blue healing only",function()
+    local description="施法缓慢的法术，可以为单一目标治疗881到982点伤害。"
+    fixture(1060,description,2600,370)
+    local t,n=hover(1060,"GetAction")
+    eq(t:NumLines(),n+1)
+    eq(last(t),"效率：|cff66b3ff治疗 1.17|r")
+    local amount,kind=effect(description,"zhCN")
+    eq(amount,931.5); eq(kind,"healing")
+    local wrapped=description:gsub("治疗881","治\n疗881")
+    eq(last(hover(1060,"GetAction",wrapped)),"效率：|cff66b3ff治疗 1.17|r")
+end)
 test("mixed spell keeps blue healing and red damage in one line",function()
     fixture(2001,"造成300点神圣伤害，并为附近队友恢复600点生命值。",3000,100)
     local t,n=hover(2001,"GetAction")
@@ -666,17 +725,18 @@ test("an off GCD cast does not require haste or invent a one second minimum",fun
     local t=hover(3103); UnitSpellHaste=original
     eq(last(t),"效率：|cff66b3ff治疗 4.86|r")
 end)
-test("repeated hovers retain only three settings and no history",function()
+test("repeated hovers retain only character settings and no history",function()
     for i=1,1000 do
         local t,n=hover(i%2==0 and 1001 or 1002,"GetAction")
         eq(t:NumLines(),n+1)
     end
     local count=0
     for key in pairs(SpellEfficiencyDB) do
-        assert(key=="enabled" or key=="timeWeight" or key=="minimapAngle")
+        assert(key=="enabled" or key=="timeWeight" or key=="minimapAngle" or key=="manaRegen"
+            or key=="vialX" or key=="vialY")
         count=count+1
     end
-    eq(count,3)
+    eq(count,6)
     local declared=false
     for line in io.lines(PROJECT_ROOT .. "/SpellEfficiency/SpellEfficiency.toc") do
         if line=="## SavedVariablesPerCharacter: SpellEfficiencyDB" then declared=true end
@@ -768,6 +828,7 @@ local function reload(saved, alreadyLoggedIn)
     SpellEfficiencyDB=saved; loggedIn=alreadyLoggedIn or false; callbacks={}; frames={}; A={}
     GameTooltip=newTooltip("GameTooltip"); UISpecialFrames={}
     SpellEfficiencyMinimapButton=nil; SpellEfficiencySettingsFrame=nil
+    SpellEfficiencyManaRegenBar=nil
     for line in io.lines(PROJECT_ROOT .. "/SpellEfficiency/SpellEfficiency.toc") do
         if line:match("%.lua$") then assert(loadfile(PROJECT_ROOT .. "/SpellEfficiency/" .. line))("SpellEfficiency",A) end
     end
@@ -775,16 +836,18 @@ local function reload(saved, alreadyLoggedIn)
     event("ADDON_LOADED","SpellEfficiency")
     if not loggedIn then loggedIn=true; event("PLAYER_LOGIN") end
 end
-test("settings reload restores only the current characters three scalar values",function()
+test("settings reload preserves existing choices and defaults the new monitor off",function()
     reload({enabled=false,timeWeight=0.25,minimapAngle=90})
     eq(SpellEfficiencyDB.enabled,false); eq(SpellEfficiencyDB.timeWeight,0.25)
+    eq(SpellEfficiencyDB.manaRegen,false)
     near(SpellEfficiencyMinimapButton.point[5],78)
     SpellEfficiencyMinimapButton:Click(); local panel=SpellEfficiencySettingsFrame
     eq(panel.enabled:GetChecked(),false); eq(panel.weight:GetText(),"0.25")
     local t,n=hover(1004); eq(t:NumLines(),n)
-    reload({enabled="bad",timeWeight=2,minimapAngle=math.huge})
+    reload({enabled="bad",timeWeight=2,minimapAngle=math.huge,manaRegen="yes"})
     eq(SpellEfficiencyDB.enabled,true); eq(SpellEfficiencyDB.timeWeight,0.8)
     eq(SpellEfficiencyDB.minimapAngle,225)
+    eq(SpellEfficiencyDB.manaRegen,false)
     reload(nil); eq(SpellEfficiencyDB.timeWeight,0.8)
     local buttons=0
     event("ADDON_LOADED","UnrelatedAddon"); event("PLAYER_LOGIN")
@@ -796,8 +859,6 @@ test("settings reload restores only the current characters three scalar values",
     eq(SpellEfficiencyMinimapButton,nil)
     Minimap=map; event("ADDON_LOADED","Blizzard_Minimap")
     assert(SpellEfficiencyMinimapButton)
-    playerClass="MAGE"; reload(nil); eq(SpellEfficiencyMinimapButton,nil); eq(#callbacks,0)
-    playerClass="PRIEST"; reload(nil)
 end)
 
 test("regrowth healing continuation contributes the complete second effect",function()
@@ -1172,10 +1233,389 @@ test("calibrated penance still respects GCD weight and one line across repeated 
     for i=1,10 do callbacks[1](t,t.data); eq(last(t),measuredPenance); eq(t:NumLines(),n+1) end
     event("PLAYER_LOGOUT")
     local count=0; for key in pairs(SpellEfficiencyDB) do
-        assert(key=="enabled" or key=="timeWeight" or key=="minimapAngle"); count=count+1
+        assert(key=="enabled" or key=="timeWeight" or key=="minimapAngle" or key=="manaRegen"
+            or key=="vialX" or key=="vialY"); count=count+1
     end
-    eq(count,3)
+    eq(count,6)
     for _,frame in ipairs(frames) do eq(frame.scripts.OnUpdate,nil) end
     spellHaste=0
 end)
+test("mana users outside the tooltip class list can enable the monitor",function()
+    playerClass="MAGE"; reload(nil)
+    assert(SpellEfficiencyMinimapButton,"mana users need the minimap settings entry")
+    eq(#callbacks,0); eq(SpellEfficiencyManaRegenBar,nil)
+    local reads=costReads
+    event("UNIT_SPELLCAST_SUCCEEDED","player","before-enable",1004)
+    eq(costReads,reads)
+    SpellEfficiencyMinimapButton:Click()
+    local panel=SpellEfficiencySettingsFrame
+    eq(panel.enabled,nil); eq(panel.weight,nil); eq(panel.manaRegen:GetChecked(),false)
+    panel.manaRegen:Click()
+    eq(SpellEfficiencyDB.manaRegen,true)
+    eq(SpellEfficiencyManaRegenBar:IsShown(),true)
+    eq(SpellEfficiencyManaRegenBar.scripts.OnUpdate,nil)
+    SpellEfficiencyMinimapButton:Click("RightButton")
+    eq(panel.manaRegen:GetChecked(),false)
+    eq(SpellEfficiencyManaRegenBar:IsShown(),false)
+end)
+
+local function vialTextures()
+    local vial=SpellEfficiencyManaRegenBar
+    local liquid, halo
+    for _,frame in ipairs(frames) do
+        if frame.parent==vial and frame.kind=="Texture" then
+            if frame.layer=="ARTWORK" and not frame.sublayer then liquid=frame end
+            if frame.layer=="BACKGROUND" and frame.sublayer==-1 then halo=frame end
+        end
+    end
+    assert(liquid and halo,"vial needs liquid and a separate glow")
+    return liquid,halo
+end
+
+local function manaRemaining()
+    if not SpellEfficiencyManaRegenBar.scripts.OnUpdate then return 0 end
+    local liquid=vialTextures()
+    if not liquid:IsShown() then return 5 end
+    return math.floor((1 - liquid.height/62)*50 + 0.5)/10
+end
+
+local function stepTimer(at)
+    now=at
+    local bar=SpellEfficiencyManaRegenBar
+    if bar.scripts.OnUpdate then bar.scripts.OnUpdate(bar) end
+    return manaRemaining()
+end
+
+local function sendCast(guid, id)
+    event("UNIT_SPELLCAST_SENT","player","",guid,id)
+end
+
+local function succeed(guid, id)
+    event("UNIT_SPELLCAST_SUCCEEDED","player",guid,id)
+end
+
+test("characters without a mana pool have no monitor even with a saved toggle",function()
+    playerClass="WARRIOR"; maxMana=0; reload({manaRegen=true})
+    event("PLAYER_ENTERING_WORLD")
+    eq(SpellEfficiencyMinimapButton,nil); eq(SpellEfficiencyManaRegenBar,nil); eq(#callbacks,0)
+    for _,frame in ipairs(frames) do eq(frame.events.UNIT_SPELLCAST_SUCCEEDED,nil) end
+end)
+
+test("a protected or pending mana maximum is checked again on entering the world",function()
+    playerClass="SHAMAN"; maxMana=secret; reload({manaRegen=true})
+    eq(SpellEfficiencyMinimapButton,nil); eq(SpellEfficiencyManaRegenBar,nil)
+    maxMana=1800; event("PLAYER_ENTERING_WORLD")
+    assert(SpellEfficiencyMinimapButton); eq(SpellEfficiencyManaRegenBar:IsShown(),true); eq(#callbacks,0)
+    local bar=SpellEfficiencyManaRegenBar
+    event("PLAYER_ENTERING_WORLD"); eq(SpellEfficiencyManaRegenBar,bar)
+end)
+
+test("druid forms and empty mana keep the same monitor while energy casts do not reset it",function()
+    playerClass="DRUID"; maxMana=1400; now=100
+    local previousPower=UnitPower
+    UnitPower=function() manaReads=manaReads+1; return 0 end
+    UnitPowerType=function() return 3 end
+    local reads=manaReads
+    reload({manaRegen=true}); eq(#callbacks,1)
+    local bar=SpellEfficiencyManaRegenBar
+    eq(bar:IsShown(),true)
+    fixture(6101,"造成100点伤害。",0,80)
+    fixture(6102,"造成100点伤害。",0,50); spells[6102].costs={{type=3,cost=50}}
+    succeed("cast-form",6101); eq(manaRemaining(),5)
+    stepTimer(102); UnitPowerType=function() return 1 end; event("UNIT_DISPLAYPOWER","player")
+    succeed("cast-energy",6102); eq(manaRemaining(),3); eq(manaReads,reads)
+    eq(SpellEfficiencyManaRegenBar,bar)
+    UnitPower=previousPower; UnitPowerType=nil
+end)
+
+test("successful casts start five seconds and new spending restarts the same bar",function()
+    playerClass="PRIEST"; now=100; reload({manaRegen=true})
+    local bar=SpellEfficiencyManaRegenBar
+    sendCast("cast-read",6101); event("UNIT_SPELLCAST_START","player","cast-read",6101)
+    eq(bar.scripts.OnUpdate,nil)
+    stepTimer(102); succeed("cast-read",6101)
+    eq(manaRemaining(),5)
+    eq(stepTimer(104),3)
+    succeed("cast-instant",6101); eq(manaRemaining(),5)
+    eq(stepTimer(107),2)
+    eq(stepTimer(108.95),0.1)
+    eq(stepTimer(109),0); eq(bar.scripts.OnUpdate,nil)
+end)
+
+test("cancelled casts, potions and zero cost spells leave the existing deadline alone",function()
+    now=120; succeed("cast-paid",6101); stepTimer(121)
+    fixture(6103,"恢复100点法力值。",0,0)
+    fixture(6104,"恢复法力药水。",0,0); spells[6104].costs=nil
+    succeed("cast-free",6103); succeed("cast-potion",6104)
+    sendCast("cast-cancelled",6101); event("UNIT_SPELLCAST_START","player","cast-cancelled",6101)
+    event("UNIT_SPELLCAST_INTERRUPTED","player","cast-cancelled",6101)
+    event("UNIT_SPELLCAST_STOP","player","cast-cancelled",6101)
+    eq(stepTimer(124),1); eq(stepTimer(125),0)
+end)
+
+test("a consumed free-cast aura still applies to its matched instant and cast-time spell",function()
+    fixture(6105,"恢复100点生命值。",0,100)
+    local costs={{type=0,cost=100},{type=0,cost=0,requiredAuraID=999,hasRequiredAura=true}}
+    spells[6105].costs=costs
+    for _,isCastTime in ipairs({false,true}) do
+        local guid=isCastTime and "zero-cast-time" or "zero-instant"
+        costs[2].hasRequiredAura=true
+        sendCast(guid,6105)
+        if isCastTime then event("UNIT_SPELLCAST_START","player",guid,6105) end
+        costs[2].hasRequiredAura=false
+        succeed(guid,6105)
+        eq(SpellEfficiencyManaRegenBar.scripts.OnUpdate,nil)
+    end
+    succeed("paid-after-proc",6105); eq(manaRemaining(),5)
+end)
+
+test("a queued spell keeps its own cost and is refreshed when its cast actually starts",function()
+    now=150; reload({manaRegen=true})
+    local costs=spells[6105].costs; costs[2].hasRequiredAura=true
+    sendCast("previous-free",6105); event("UNIT_SPELLCAST_START","player","previous-free",6105)
+    sendCast("queued",6105)
+    costs[2].hasRequiredAura=false
+    succeed("previous-free",6105); eq(SpellEfficiencyManaRegenBar.scripts.OnUpdate,nil)
+    event("UNIT_SPELLCAST_START","player","queued",6105)
+    succeed("queued",6105); eq(manaRemaining(),5)
+end)
+
+test("one channel uses its first spend regardless of success event order and interruption",function()
+    fixture(6106,"在3秒内造成600点暗影伤害。",0,150)
+    playerClass="MAGE"; now=160; reload({manaRegen=true})
+    sendCast("channel-first",6106)
+    event("UNIT_SPELLCAST_CHANNEL_START","player","channel-first",6106)
+    eq(manaRemaining(),5)
+    stepTimer(161); succeed("channel-first",6106)
+    eq(manaRemaining(),4)
+    event("UNIT_SPELLCAST_CHANNEL_UPDATE","player","channel-first",6106)
+    event("UNIT_SPELLCAST_CHANNEL_STOP","player","channel-first",6106)
+    eq(stepTimer(165),0)
+    stepTimer(170); succeed("success-first",6106)
+    stepTimer(171); event("UNIT_SPELLCAST_CHANNEL_START","player","success-first",6106)
+    eq(manaRemaining(),4); eq(stepTimer(175),0)
+end)
+
+test("only confirmed up-front mana spending starts the timer, including mixed costs",function()
+    now=180
+    fixture(6107,"造成100点伤害。",0,100)
+    for i,costs in ipairs({{{type=-2,cost=40}},{{type=0,cost=0,costPerSec=10}},
+        {{type=0,cost=100,requiredAuraID=1,hasRequiredAura=false}}}) do
+        spells[6107].costs=costs
+        succeed("no-initial-mana-" .. i,6107); eq(SpellEfficiencyManaRegenBar.scripts.OnUpdate,nil)
+    end
+    spells[6107].costs={{type=-2,cost=40},{type=0,cost=20,costPerSec=10}}
+    succeed("mixed-mana",6107); eq(manaRemaining(),5)
+end)
+
+test("inaccessible cast fields and cost errors do not restart the timer, and the next cast recovers",function()
+    now=190; reload({manaRegen=true})
+    local bar=SpellEfficiencyManaRegenBar
+    local reads=costReads
+    event("UNIT_SPELLCAST_SUCCEEDED","party1","other",6101)
+    succeed(secret,6101); succeed("locked-id",secret); succeed(nil,6101)
+    eq(costReads,reads)
+    fixture(6108,"造成100点伤害。",0,100); spells[6108].costError=true
+    sendCast("error",6108); succeed("error",6108)
+    eq(bar.scripts.OnUpdate,nil)
+    spells[6108].costError=false; spells[6108].costs={{type=0,cost=secret}}
+    succeed("hidden-cost",6108); eq(bar.scripts.OnUpdate,nil)
+    spells[6108].costs={{type=0,cost=30}}
+    succeed("ok",6108); eq(manaRemaining(),5)
+end)
+
+test("the monitor switch acts independently and reload persists only the preference",function()
+    playerClass="PRIEST"; now=200; reload({enabled=true,timeWeight=0.6,manaRegen=true})
+    succeed("paid-before-toggle",6101); eq(manaRemaining(),5)
+    SpellEfficiencyMinimapButton:Click("RightButton")
+    eq(SpellEfficiencyDB.enabled,false); eq(SpellEfficiencyDB.manaRegen,true)
+    eq(stepTimer(201),4)
+    SpellEfficiencyMinimapButton:Click(); local panel=SpellEfficiencySettingsFrame
+    panel.weight:SetText("0.4")
+    panel.manaRegen:Click()
+    local bar=SpellEfficiencyManaRegenBar
+    eq(SpellEfficiencyDB.manaRegen,false); eq(bar:IsShown(),false); eq(next(bar.events),nil)
+    eq(bar.scripts.OnUpdate,nil); eq(panel.weight:GetText(),"0.4"); eq(SpellEfficiencyDB.timeWeight,0.6)
+    local reads=costReads; succeed("paid-disabled",6101); eq(costReads,reads)
+    panel.manaRegen:Click()
+    local _,halo=vialTextures()
+    eq(halo:IsShown(),true); eq(bar.scripts.OnUpdate,nil)
+    succeed("paid-before-reload",6101); eq(manaRemaining(),5)
+    reload(SpellEfficiencyDB,true)
+    eq(SpellEfficiencyDB.enabled,false); eq(SpellEfficiencyDB.manaRegen,true)
+    _,halo=vialTextures()
+    eq(halo:IsShown(),true); eq(SpellEfficiencyManaRegenBar.scripts.OnUpdate,nil)
+end)
+
+test("mana vial fills upward, glows only when full and clears instantly on spending",function()
+    now=210; reload({manaRegen=true})
+    local vial=SpellEfficiencyManaRegenBar
+    eq(vial.width,48); eq(vial.height,96)
+    local liquid,halo=vialTextures()
+    local textureFile=assert(liquid.texture:match("([^\\\\]+)$"))
+    local atlas=assert(io.open(PROJECT_ROOT .. "/SpellEfficiency/" .. textureFile,"rb"))
+    atlas:close()
+    near(liquid.height,62); eq(halo:IsShown(),true); eq(halo.animation.plays,1)
+    succeed("first-vial",6101)
+    eq(liquid:IsShown(),false); eq(halo:IsShown(),false)
+    stepTimer(212.5)
+    eq(liquid:IsShown(),true); eq(halo:IsShown(),false)
+    near(liquid.height,31); eq(liquid.point[1],"BOTTOM"); eq(liquid.point[5],-84)
+    near(liquid.texCoord[3],53/96); near(liquid.texCoord[4],84/96)
+    stepTimer(215)
+    near(liquid.height,62); eq(halo:IsShown(),true); eq(vial.scripts.OnUpdate,nil)
+    eq(halo.animation.plays,2); eq(halo.animation.looping,"BOUNCE")
+    eq(halo.animation.animation.kind,"Alpha"); eq(halo.animation.animation.duration,1)
+    stepTimer(216); eq(halo.animation.plays,2)
+    succeed("second-vial",6101)
+    eq(liquid:IsShown(),false); eq(halo:IsShown(),false)
+    eq(halo.animation.playing,false); eq(manaRemaining(),5)
+end)
+
+test("the mana vial has no text in any state",function()
+    now=220; reload({manaRegen=true})
+    local vial=SpellEfficiencyManaRegenBar
+    for _,frame in ipairs(frames) do
+        assert(frame.parent~=vial or frame.kind~="FontString","the vial must be icon-only")
+    end
+end)
+
+test("opening defaults to a full vial without tracking any closed-session casts",function()
+    playerClass="MAGE"; now=230; reload(nil)
+    local reads,currentManaReads=costReads,manaReads
+    eq(SpellEfficiencyManaRegenBar,nil)
+    for _,frame in ipairs(frames) do eq(frame.events.UNIT_SPELLCAST_SUCCEEDED,nil) end
+    event("UNIT_SPELLCAST_SUCCEEDED","player","cast-while-closed",6101)
+    SpellEfficiencyMinimapButton:Click("RightButton")
+    local vial=SpellEfficiencyManaRegenBar
+    local liquid,halo=vialTextures()
+    eq(halo:IsShown(),true); near(liquid.height,62)
+    eq(halo.animation.plays,1); eq(vial.scripts.OnUpdate,nil)
+    eq(costReads,reads); eq(manaReads,currentManaReads)
+end)
+
+test("dragging in settings persists the position and locks on closing",function()
+    playerClass="PRIEST"; now=300; reload({manaRegen=true,vialX="bad",vialY=-999})
+    local vial=SpellEfficiencyManaRegenBar
+    eq(vial.point[4],0); eq(vial.point[5],-118); eq(vial.mouse,false)
+    vial.scripts.OnDragStart(vial); assert(not vial.moving)
+    SpellEfficiencyMinimapButton:Click()
+    eq(vial.mouse,true); eq(vial.strata,"DIALOG"); eq(vial.movable,true)
+    vial.scripts.OnDragStart(vial)
+    eq(vial.moving,true)
+    vial.x,vial.y=147,369
+    SpellEfficiencySettingsFrame:Hide()
+    eq(vial.moving,false); eq(vial.mouse,false); eq(vial.strata,"MEDIUM")
+    eq(vial.userPlaced,false)
+    eq(SpellEfficiencyDB.vialX,-53); eq(SpellEfficiencyDB.vialY,69)
+    eq(vial.point[2],UIParent); eq(vial.point[4],-53); eq(vial.point[5],69)
+    reload(SpellEfficiencyDB,true)
+    vial=SpellEfficiencyManaRegenBar
+    eq(vial.point[4],-53); eq(vial.point[5],69); eq(vial.mouse,false)
+end)
+
+test("full vial glow stops when hidden and restarts only when visible and full",function()
+    playerClass="MAGE"; now=310; reload({manaRegen=true})
+    local vial=SpellEfficiencyManaRegenBar
+    local _,halo=vialTextures()
+    local pulse=halo.animation
+    eq(pulse.playing,true); eq(pulse.plays,1); eq(vial.scripts.OnUpdate,nil)
+    vial:Hide()
+    eq(pulse.playing,false); eq(halo:IsShown(),true)
+    vial:Show()
+    eq(pulse.playing,true); eq(pulse.plays,2)
+    succeed("paid-before-hide",6101)
+    eq(pulse.playing,false); eq(halo:IsShown(),false)
+    vial:Hide(); now=313; vial:Show()
+    eq(pulse.playing,false); eq(pulse.plays,2)
+    stepTimer(315)
+    eq(pulse.playing,true); eq(pulse.plays,3); eq(vial.scripts.OnUpdate,nil)
+    SpellEfficiencyMinimapButton:Click("RightButton")
+    eq(vial:IsShown(),false); eq(pulse.playing,false)
+
+    UIParent:Hide(); reload({manaRegen=true},true)
+    vial=SpellEfficiencyManaRegenBar
+    _,halo=vialTextures()
+    pulse=halo.animation
+    eq(vial:IsShown(),true); eq(vial:IsVisible(),false); eq(pulse.plays,0)
+    UIParent:Show(); vial.scripts.OnShow(vial)
+    eq(pulse.playing,true); eq(pulse.plays,1)
+    vial.scripts.OnShow(vial)
+    eq(pulse.plays,1); eq(vial.scripts.OnUpdate,nil)
+end)
+
+local function vialMist()
+    for _,frame in ipairs(frames) do
+        if frame.kind=="Texture" and frame.texture and frame.texture:match("ManaVialMist%.tga$") then
+            eq(frame.parent.parent,SpellEfficiencyManaRegenBar)
+            return frame.parent,frame
+        end
+    end
+    error("missing the vial's spiral mist texture")
+end
+
+test("actual refill plays the mist once, then leaves only the existing full glow",function()
+    playerClass="MAGE"; now=330; reload({manaRegen=true})
+    local mist,art=vialMist()
+    local _,halo=vialTextures()
+    local atlas=assert(io.open(PROJECT_ROOT .. "/SpellEfficiency/ManaVialMist.tga","rb"))
+    atlas:close()
+    eq(mist:IsShown(),false); eq(mist.scripts.OnUpdate,nil)
+    eq(halo.animation.plays,1)
+
+    fixture(6120,"造成100点伤害。",0,80)
+    succeed("mist-first",6120)
+    eq(stepTimer(334.95),0.1); eq(mist:IsShown(),false)
+    eq(stepTimer(335),0); eq(mist:IsShown(),true)
+    eq(halo.animation.plays,2)
+    near(art.texCoord[1],1/1024); near(art.texCoord[3],1/512)
+    near(art.texCoord[2],99/1024); near(art.texCoord[4],101/512)
+    local update=assert(mist.scripts.OnUpdate)
+    now=335+11.25/24; update(mist)
+    near(art.texCoord[1],101/1024); near(art.texCoord[3],103/512)
+    local coords=art.texCoord
+    now=335+11.5/24; update(mist)
+    eq(art.texCoord,coords)
+    now=335+48.5/24; update(mist)
+    eq(mist:IsShown(),true)
+    near(art.texCoord[1],801/1024); near(art.texCoord[3],409/512)
+    now=335+49.5/24; update(mist)
+    eq(mist:IsShown(),false); eq(mist.scripts.OnUpdate,nil)
+    eq(SpellEfficiencyManaRegenBar.scripts.OnUpdate,nil)
+    eq(halo.animation.playing,true); eq(halo.animation.plays,2)
+
+    succeed("mist-next",6120)
+    stepTimer(now+5.01)
+    eq(mist:IsShown(),true); near(art.texCoord[1],1/1024)
+    eq(halo.animation.plays,3)
+end)
+
+test("only new spending, hiding or disabling cuts off a live mist",function()
+    playerClass="MAGE"; now=350; reload({manaRegen=true})
+    local vial=SpellEfficiencyManaRegenBar
+    local mist=vialMist()
+    local _,halo=vialTextures()
+    fixture(6120,"造成100点伤害。",0,80)
+    fixture(6121,"恢复100点生命值。",0,0)
+    succeed("mist-before-free-cast",6120)
+    stepTimer(355)
+    succeed("free-with-mist",6121); eq(mist:IsShown(),true)
+    succeed("paid-with-mist",6120)
+    eq(mist:IsShown(),false); eq(mist.scripts.OnUpdate,nil)
+    eq(manaRemaining(),5); eq(halo.animation.playing,false)
+
+    stepTimer(360)
+    eq(mist:IsShown(),true)
+    vial:Hide(); eq(mist:IsShown(),false); eq(mist.scripts.OnUpdate,nil)
+    vial:Show(); eq(mist:IsShown(),false); eq(halo.animation.playing,true)
+
+    succeed("mist-before-disable",6120); stepTimer(365)
+    eq(mist:IsShown(),true)
+    SpellEfficiencyMinimapButton:Click("RightButton")
+    eq(mist:IsShown(),false); eq(mist.scripts.OnUpdate,nil)
+    SpellEfficiencyMinimapButton:Click("RightButton")
+    eq(mist:IsShown(),false); eq(mist.scripts.OnUpdate,nil)
+    eq(halo.animation.playing,true)
+end)
+
 print("TOTAL " .. passed .. " spell-efficiency tests passed")

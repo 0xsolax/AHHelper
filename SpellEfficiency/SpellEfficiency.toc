@@ -1,6 +1,6 @@
 ## Interface: 16001
 ## Title: 法术效率 SpellEfficiency
-## Notes: 牧师与德鲁伊耗蓝法术悬停提示：每蓝效果，时间权重可调
+## Notes: 牧师与德鲁伊法术效率提示，所有耗蓝角色可开启五秒回蓝监控
 ## Author: Solazhu
 ## Version: 0.1.7-test
 ## SavedVariablesPerCharacter: SpellEfficiencyDB
