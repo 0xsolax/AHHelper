@@ -35,7 +35,15 @@ end
 
 function L.RecipeInput(product, recipe)
     return { itemID = product.itemID, fee = product.fee, output = recipe.output,
-        extra = recipe.extra, materials = recipe.materials }
+        extra = recipe.extra, materials = recipe.materials, purchase = recipe.purchase }
+end
+
+-- Resale is one purchased item per sale; saved crafting materials stay unchanged.
+function L.InputMaterials(input)
+    if type(input.purchase) == "table" then
+        return {{itemID = input.itemID, quantity = 1, source = input.purchase.source, price = input.purchase.price}}
+    end
+    return input.materials or {}
 end
 
 function L.MigrateDB(database)
@@ -70,16 +78,23 @@ function L.Validate(product)
     if not L.Number(product.output, 1, 100000, true) then return nil, "产量须为大于零的整数。" end
     if not L.Number(product.fee, 0, 99.99, false) then return nil, "手续费须在 0% 至 99.99% 之间。" end
     if not L.Number(product.extra, 0, 1000000000000, true) then return nil, "额外费用须为有效金额。" end
-    if type(product.materials) ~= "table" or #product.materials == 0 then return nil, "请至少添加一种材料。" end
+    if product.purchase ~= nil then
+        if type(product.purchase) ~= "table" or product.output ~= 1
+            or type(product.materials) ~= "table" or next(product.materials) then
+            return nil, "单品转售按每件进货核算，无需填写材料或生产产量。"
+        end
+    elseif type(product.materials) ~= "table" or #product.materials == 0 then
+        return nil, "请至少添加一种材料。"
+    end
     local seen = {}
-    for i, material in ipairs(product.materials) do
+    for i, material in ipairs(L.InputMaterials(product)) do
         if not L.ItemID(material.itemID) then return nil, "第 " .. i .. " 行尚未选择材料。" end
         if seen[material.itemID] then return nil, "同一种材料请合并用量。" end
-        if product.itemID == material.itemID then return nil, "成品与材料不能是同一物品。" end
+        if not product.purchase and product.itemID == material.itemID then return nil, "成品与材料不能是同一物品。" end
         seen[material.itemID] = true
         if not L.Number(material.quantity, 1, 100000, true) then return nil, "材料用量须为大于零的整数。" end
         if material.source ~= "market" and material.source ~= "auction"
-            and material.source ~= "vendor" and material.source ~= "fixed" then return nil, "请选择材料价格来源。" end
+            and material.source ~= "vendor" and material.source ~= "fixed" then return nil, "请选择采购价格来源。" end
         if material.source == "fixed" and not L.Number(material.price, 0, 1000000000000, true) then
             return nil, "请输入有效的固定采购价。"
         end
@@ -154,7 +169,7 @@ function L.Estimate(product, quotes, now, ttl, batches, saleOverride, vendorPric
         result.error = saleQuote and saleQuote.error or "成品缺价或行情已过期"
     end
     local materialCost = 0
-    for _, material in ipairs(product.materials) do
+    for _, material in ipairs(L.InputMaterials(product)) do
         local quantity = material.quantity * batches
         local row = { itemID = material.itemID, quantity = quantity, source = material.source }
         local vendor = L.VendorPrice(material, vendorPrices)
@@ -177,7 +192,7 @@ function L.Estimate(product, quotes, now, ttl, batches, saleOverride, vendorPric
                 if not row.cost then row.error = "可买数量不足" end
             end
         end
-        if row.error then result.error = result.error or "材料" .. row.itemID .. "：" .. row.error end
+        if row.error then result.error = result.error or (product.purchase and "进货：" or "材料" .. row.itemID .. "：") .. row.error end
         materialCost = materialCost + (row.cost or 0)
         table.insert(result.materials, row)
     end

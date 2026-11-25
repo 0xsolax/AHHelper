@@ -12,17 +12,24 @@ function N.RecordMerchantPrices()
         local itemID = GetMerchantItemID(index)
         if tracked[itemID] then
             local info = C_MerchantFrame.GetItemInfo(index)
-            if info and info.name and info.name ~= "" and info.isPurchasable and info.numAvailable == -1
+            if info and info.name and info.name ~= ""
                 and not info.hasExtendedCost and not info.currencyID and not info.spellID
-                and L.Number(info.price, 1, 1000000000000, true)
-                and L.Number(info.stackCount, 1, 100000, true) then
+                and L.Number(info.numAvailable, -1, 1000000000, true) then
                 local previous = L.VendorPrice({itemID = itemID, source = "vendor"}, A.profile.vendorPrices)
-                A.profile.vendorPrices[itemID] = { price = info.price, stackCount = info.stackCount, seenAt = GetServerTime() }
-                if not previous or previous.price / previous.stackCount ~= info.price / info.stackCount then
-                    local _, _, link = A.ItemInfo(itemID)
-                    local unit = (info.price % info.stackCount ~= 0 and "约 " or "") .. L.Money(info.price / info.stackCount)
-                    A.Message((previous and "商店价已更新：" or "已记录商店价：") .. (link or info.name)
-                        .. " · " .. unit .. " / 件（" .. L.Money(info.price) .. " / " .. info.stackCount .. " 件）")
+                if info.isPurchasable and L.Number(info.price, 1, 1000000000000, true)
+                    and L.Number(info.stackCount, 1, 100000, true) then
+                    local now = GetServerTime()
+                    A.profile.vendorPrices[itemID] = {price = info.price, stackCount = info.stackCount, seenAt = now,
+                        numAvailable = info.numAvailable, stockSeenAt = now}
+                    if not previous or previous.price / previous.stackCount ~= info.price / info.stackCount then
+                        local _, _, link = A.ItemInfo(itemID)
+                        local unit = (info.price % info.stackCount ~= 0 and "约 " or "") .. L.Money(info.price / info.stackCount)
+                        A.Message((previous and "商店价已更新：" or "已记录商店价：") .. (link or info.name)
+                            .. " · " .. unit .. " / 件（" .. L.Money(info.price) .. " / " .. info.stackCount .. " 件）")
+                    end
+                elseif previous and info.numAvailable == 0 then
+                    -- A sold-out offer may no longer expose a purchasable price. Keep its original price time.
+                    previous.numAvailable, previous.stockSeenAt = 0, GetServerTime()
                 end
             end
         end
@@ -32,7 +39,12 @@ end
 
 -- Read only the native profession selection; never craft or change its filters.
 function N.ReadRecipe()
-    local form = ProfessionsFrame and ProfessionsFrame.CraftingPage and ProfessionsFrame.CraftingPage.SchematicForm
+    if ProfessionsFrame and ProfessionsFrame.IsShown and not ProfessionsFrame:IsShown() then
+        return nil, "请先打开专业窗口并选择一个配方。"
+    end
+    local page = ProfessionsFrame and ProfessionsFrame.CraftingPage
+    if page and page.IsVisible and not page:IsVisible() then return nil, "请切回专业制作页面并选择配方。" end
+    local form = page and page.SchematicForm
     if not form or not form.GetRecipeInfo then return nil, "请先打开专业窗口并选择一个配方，再点击读取。" end
     if not C_TradeSkillUI or not C_TradeSkillUI.GetRecipeSchematic then return nil, "当前客户端没有可用的配方读取接口。" end
     local ok, info, schematic = pcall(function()
@@ -78,6 +90,25 @@ function N.ReadRecipe()
     local valid, err = L.Validate(draft)
     if not valid then return nil, err end
     return draft
+end
+
+function N.InstallRecipeButton()
+    if not ProfessionsFrame or not ProfessionsFrame.HookScript or not A.UI.scanFrame then return end
+    if not N.recipeButton then
+        N.recipeButton = A.Widgets.Button(ProfessionsFrame, "扫描利润", 116, 24, function()
+            local ok, err = A.UI.ScanCurrentRecipe()
+            if not ok then A.Message(err) end
+        end)
+    end
+    N.recipeButton:SetParent(ProfessionsFrame)
+    N.recipeButton:ClearAllPoints()
+    N.recipeButton:SetPoint("TOPRIGHT", ProfessionsFrame, "TOPRIGHT", -44, -6)
+    if not ProfessionsFrame.auctionPilotScanHooked then
+        ProfessionsFrame:HookScript("OnHide", function()
+            if A.Market.batch and A.Market.batch.scan then A.Market.Pause(); A.RefreshUI() end
+        end)
+        ProfessionsFrame.auctionPilotScanHooked = true
+    end
 end
 
 function N.Attach()
@@ -249,6 +280,10 @@ local function finishPost(pending)
 end
 
 function N.OnEvent(event, itemID)
+    if event == "TRADE_SKILL_SHOW" or event == "ADDON_LOADED" then N.InstallRecipeButton() end
+    if event == "TRADE_SKILL_CLOSE" and A.Market.batch and A.Market.batch.scan then
+        A.Market.Pause(); A.RefreshUI()
+    end
     if event == "MERCHANT_SHOW" or (event == "MERCHANT_UPDATE" and MerchantFrame and MerchantFrame:IsShown()) then
         N.RecordMerchantPrices()
         return

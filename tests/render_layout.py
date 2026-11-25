@@ -48,12 +48,12 @@ A.UI.quantity:SetText("20")
 MOCK.addon = A
 ''')
 
-def render(path, native=False, menu=False):
+def render(path, native=False, menu=False, root=None):
     frames = list(lua.globals().MOCK.frames.values())
     by_id = {int(f.index): f for f in frames}
     bounds = {}
     scale = 1.5
-    root = lua.globals().AuctionHouseFrame if native else lua.globals().MOCK.addon.UI.frame
+    root = root or (lua.globals().AuctionHouseFrame if native else lua.globals().MOCK.addon.UI.frame)
     root_id = int(root.index)
     anchors = {"TOPLEFT": (0, 0), "TOP": (.5, 0), "TOPRIGHT": (1, 0), "LEFT": (0, .5),
                "CENTER": (.5, .5), "RIGHT": (1, .5), "BOTTOMLEFT": (0, 1), "BOTTOM": (.5, 1), "BOTTOMRIGHT": (1, 1)}
@@ -267,5 +267,93 @@ MOCK.time=MOCK.time+3; M.Tick(); MOCK.addon.RefreshUI()
 ''')
 render(ROOT / ".tools" / "layout-checks" / "retry-long-name.png", native=True)
 lua.execute('MOCK.addon.Market.Pause()')
+lua.execute('''
+local A = MOCK.addon
+A.Market.SetAuto(false); MOCK.time = MOCK.time+26; A.Market.Tick(); MOCK.items[1] = "硫酸"
+A.AcceptQuote(1,A.Logic.Snapshot({{price=11950,quantity=50}},MOCK.time,true))
+MOCK.items[5], MOCK.items[6] = "商店商品（示例）", "限量图纸（示例）"
+for _, itemID in ipairs({5,6}) do
+    assert(A.SaveProduct({itemID=itemID,recipeName="单品转售",output=1,fee=5,extra=0,materials={},
+        purchase={source="vendor"}}))
+    A.profile.vendorPrices[itemID] = {price=1000,stackCount=1,seenAt=GetServerTime(),
+        numAvailable=itemID==5 and -1 or 2,stockSeenAt=GetServerTime()}
+    A.AcceptQuote(itemID,A.Logic.Snapshot({{price=1200,quantity=60}},MOCK.time,true))
+end
+A.RefreshUI()
+''')
+render(ROOT / "design" / "offline-resale-list.png", native=True)
+lua.execute('MOCK.addon.Editor.Open(MOCK.addon.Selected())')
+render(ROOT / "design" / "offline-resale-editor.png", native=True)
+lua.execute('MOCK.addon.Editor.modeButton:Click()')
+render(ROOT / ".tools" / "layout-checks" / "resale-mode-menu.png", native=True, menu=True)
+lua.execute('MOCK.addon.Editor.purchase.sourceButton:Click()')
+render(ROOT / ".tools" / "layout-checks" / "resale-source-menu.png", native=True, menu=True)
+lua.execute('MOCK.menu=nil; MOCK.addon.Editor.Close(); MOCK.addon.Select(3)')
+render(ROOT / ".tools" / "layout-checks" / "resale-unlimited.png", native=True)
+lua.execute('''
+local A = MOCK.addon
+A.profile.vendorPrices[6].numAvailable = 0
+A.profile.vendorPrices[6].stockSeenAt = GetServerTime()+60
+A.Select(4)
+''')
+render(ROOT / ".tools" / "layout-checks" / "resale-sold-out.png", native=True)
+lua.execute('MOCK.addon.Editor.Open(MOCK.addon.Selected())')
+for width, height in ((850,600),(1000,650)):
+    lua.execute(f'AuctionHouseFrame:SetSize({width},{height})')
+    render(ROOT / ".tools" / "layout-checks" / f"resale-editor-{width}.png", native=True)
+lua.execute('AuctionHouseFrame:SetSize(800,538); MOCK.addon.profile.vendorPrices[6]=nil; MOCK.addon.RefreshUI()')
+render(ROOT / ".tools" / "layout-checks" / "resale-editor-missing-price.png", native=True)
+lua.execute('MOCK.addon.Editor.Close()')
+render(ROOT / ".tools" / "layout-checks" / "resale-missing-price.png", native=True)
+lua.execute('MOCK.addon.DeleteProduct(3); MOCK.addon.DeleteProduct(4)')
 lua.execute('MOCK.addon.DeleteProduct(1); MOCK.addon.DeleteProduct(2); MOCK.addon.open=true; MOCK.addon.Native.ShowMonitor(); MOCK.flush()')
 render(ROOT / ".tools" / "layout-checks" / "empty.png", native=True)
+lua.execute('''
+local A = MOCK.addon
+A.Market.Pause(); A.Market.draining=nil; A.Market.discardUntil={}; A.Market.nextSend=0
+A.UI.ShowRecipeScans()
+for id, itemID in pairs({[900]=1,[901]=4,[902]=5}) do
+    local draft = {itemID=itemID,recipeName=A.ItemInfo(itemID).."的专业生产配方 #"..id,
+        sourceRecipeID=id,sourceOutputMin=1,sourceOutputMax=1,output=1,fee=5,extra=0,
+        materials={{itemID=2,quantity=2,source="market"},{itemID=3,quantity=1,source="fixed",price=200}}}
+    A.FinishRecipeScan({scan={draft=draft,vendorPrices={},quotes={
+        [itemID]=A.Logic.Snapshot({{price=itemID==1 and 12000 or 8000,quantity=100}},MOCK.time,true),
+        [2]=A.Logic.Snapshot({{price=4200,quantity=100}},MOCK.time,true)}}})
+end
+A.UI.scanSelected=900; A.RefreshUI()
+''')
+scan_frame = lua.globals().MOCK.addon.UI.scanFrame
+render(ROOT / "design" / "offline-profession-scan.png", root=scan_frame)
+lua.execute('''
+MOCK.addon.UI.scanFrame:Hide(); MOCK.addon.open=false; MOCK.time=MOCK.time+130
+MOCK.addon.UI.ShowRecipeScans()
+''')
+render(ROOT / ".tools" / "layout-checks" / "scan-reopened.png", root=scan_frame)
+lua.execute('''
+local A = MOCK.addon
+A.scanResults[900].refreshError="查询超时，请刷新重试"; A.RefreshUI()
+''')
+render(ROOT / ".tools" / "layout-checks" / "scan-failed.png", root=scan_frame)
+lua.execute('''
+local A = MOCK.addon
+local draft = A.Logic.Copy(A.scanResults[900].draft)
+draft.recipeName="用于检查长名称与极大金额显示的专业生产配方以及其完整名称"
+draft.materials[1].quantity=100000; draft.output=100000
+A.FinishRecipeScan({scan={draft=draft,vendorPrices={},quotes={
+    [1]=A.Logic.Snapshot({{price=80000000000,quantity=100}},MOCK.time,true),
+    [2]=A.Logic.Snapshot({{price=10000000000,quantity=100000}},MOCK.time,true)}}})
+A.UI.scanSelected=900; A.RefreshUI()
+''')
+render(ROOT / ".tools" / "layout-checks" / "scan-large-values.png", root=scan_frame)
+lua.execute('''
+UIParent:SetSize(1024,768)
+MOCK.addon.UI.scanFrame:Hide(); MOCK.addon.UI.ShowRecipeScans()
+''')
+render(ROOT / ".tools" / "layout-checks" / "scan-small-screen.png", root=scan_frame)
+lua.execute('''
+local A = MOCK.addon
+A.open=true; A.scanResults={}; A.UI.scanSelected=nil
+for _, row in pairs(A.UI.scanRows) do row:Hide() end
+A.RefreshUI()
+''')
+render(ROOT / ".tools" / "layout-checks" / "scan-empty.png", root=scan_frame)
