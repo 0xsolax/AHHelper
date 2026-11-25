@@ -19,6 +19,24 @@ function Frame:SetWidth(w) self.width = w end
 function Frame:SetHeight(h) self.height = h end
 function Frame:GetWidth() return self.width end
 function Frame:GetHeight() return self.height end
+function Frame:GetStringWidth() return self:GetUnboundedStringWidth() end
+local anchors = {TOPLEFT={0,0},TOP={.5,0},TOPRIGHT={1,0},LEFT={0,.5},CENTER={.5,.5},
+    RIGHT={1,.5},BOTTOMLEFT={0,1},BOTTOM={.5,1},BOTTOMRIGHT={1,1}}
+function Frame:Bounds()
+    if self.allPoints then return self.allPoints:Bounds() end
+    local scale = self:GetEffectiveScale()
+    local w, h = self:GetWidth()*scale, self:GetHeight()*scale
+    if self.kind == "FontString" and w == 0 then w = self:GetUnboundedStringWidth()*scale end
+    local point = self.points[1]
+    if not point then return 0, self.parent and select(2,self.parent:Bounds()) or h, w, h end
+    local relative = point[2] or self.parent
+    local x, y, rw, rh = relative:Bounds()
+    local a, b = anchors[point[1]], anchors[point[3]]
+    return x + b[1]*rw - a[1]*w + point[4]*scale, y - b[2]*rh + a[2]*h + point[5]*scale, w, h
+end
+function Frame:GetLeft() return self:Bounds()/self:GetEffectiveScale() end
+function Frame:GetTop() return select(2,self:Bounds())/self:GetEffectiveScale() end
+function Frame:GetBottom() local _, y, _, h = self:Bounds(); return (y-h)/self:GetEffectiveScale() end
 function Frame:SetPoint(point, relative, relativePoint, x, y)
     if type(relative) == "number" then x, y, relative, relativePoint = relative, relativePoint, self.parent, point end
     if relative == nil then relative, relativePoint = self.parent, point end
@@ -194,6 +212,66 @@ function PanelTemplates_DeselectTab(tab) tab.selected = false end
 function PanelTemplates_SelectTab(tab) tab.selected = true end
 function PanelTemplates_SetTab() end
 WOW_PROJECT_ID, WOW_PROJECT_CAMELOT, WOW_PROJECT_MAINLINE = 3, 3, 1
+-- Native recipe rows are pooled tree nodes; callbacks run after native initialization.
+ScrollUtil = {AddInitializedFrameCallback=function(scroll,callback,owner)
+    scroll.initialized = function(row,node) callback(owner,row,node) end
+end}
+function MOCK.Profession(recipes, selectedID)
+    local frame = CreateFrame("Frame",nil,UIParent); frame:SetSize(782,594)
+    frame:SetPoint("TOPLEFT",UIParent,"TOPLEFT",120,-70)
+    ProfessionsFrame = frame
+    frame.TitleContainer=CreateFrame("Frame",nil,frame,"BackdropTemplate")
+    frame.TitleContainer:SetSize(782,36); frame.TitleContainer:SetPoint("TOPLEFT")
+    frame.TitleContainer:SetBackdrop({}); frame.TitleContainer:SetBackdropColor(.15,.11,.06,1)
+    local page = CreateFrame("Frame",nil,frame); page:SetSize(782,594); page:SetPoint("TOPLEFT")
+    frame.CraftingPage = page
+    function frame:SetHeight(value) self:SetSize(self:GetWidth(),value) end
+    frame:HookScript("OnSizeChanged",function() page:SetSize(frame:GetWidth(),frame:GetHeight()) end)
+    page.RecipeList = CreateFrame("Frame",nil,page); page.RecipeList:SetSize(304,500)
+    page.RecipeList:SetPoint("TOPLEFT",5,-72)
+    local scroll = CreateFrame("Frame",nil,page.RecipeList); scroll:SetSize(276,454); scroll:SetPoint("TOPLEFT",8,-35)
+    page.RecipeList.ScrollBox = scroll; scroll.rows = {}
+    function scroll:ForEachFrame(callback) for _, row in ipairs(self.rows) do callback(row,row.node) end end
+    local form = CreateFrame("Frame",nil,page); form:SetSize(460,484)
+    form:SetPoint("TOPLEFT",page.RecipeList,"TOPRIGHT",2,0); page.SchematicForm = form
+    form.Reagents = CreateFrame("Frame",nil,form); form.Reagents:SetSize(400,116)
+    form.Reagents:SetPoint("TOPLEFT",28,-155)
+    form.TrackRecipeCheckbox=CreateFrame("CheckButton",nil,form,"UICheckButtonTemplate"); form.TrackRecipeCheckbox:SetSize(26,26)
+    form.TrackRecipeCheckbox:SetPoint("BOTTOMRIGHT",-100,11)
+    function form:GetRecipeInfo() return self.info end
+    function form:GetCurrentRecipeLevel() return 2 end
+    function form:Init(info) self.info = info end
+    form:Init(recipes[selectedID].info)
+    page.CreateButton = CreateFrame("Button",nil,page,"SharedButtonSmallTemplate"); page.CreateButton:SetSize(80,24)
+    page.CreateButton:SetPoint("BOTTOMRIGHT",-20,4); page.CreateButton:SetText("制造")
+    function scroll:Reuse(row, id)
+        row.node = {data = id and {recipeInfo=recipes[id].info} or {categoryInfo={name="分类"}}}
+        function row.node:GetData() return self.data end
+        row.Label:SetText(id and recipes[id].info.name or "分类")
+        row.Label:SetWidth(200)
+        row:SetScript("OnEnter",function() MOCK.nativeRecipeHovers=(MOCK.nativeRecipeHovers or 0)+1 end)
+        if self.initialized then self.initialized(row,row.node) end
+    end
+    local ordered = {}; for id in pairs(recipes) do ordered[#ordered+1]=id end; table.sort(ordered)
+    for i, id in ipairs(ordered) do
+        local row = CreateFrame("Button",nil,scroll); row:SetSize(276,20); row:SetPoint("TOPLEFT",0,-(i-1)*22)
+        row.Label=row:CreateFontString(); row.Label:SetPoint("LEFT",18,0); row.Label:SetFont("",12,"")
+        row.Label:SetHeight(20)
+        row.Count=row:CreateFontString(); row.Count:SetPoint("LEFT",row.Label,"RIGHT",0,0); row.Count:SetText(" (25)")
+        function row:GetElementData() return self.node end
+        function row:SetCraftableCount() self.Count:SetText(" (25)") end
+        row:SetScript("OnClick",function() form:Init(row.node.data.recipeInfo) end)
+        scroll.rows[#scroll.rows+1]=row; scroll:Reuse(row,id)
+    end
+    C_TradeSkillUI = {
+        GetAllRecipeIDs=function() return ordered end,
+        GetRecipeInfo=function(id) return recipes[id] and recipes[id].info end,
+        IsRecipeFavorite=function(id) return recipes[id] and recipes[id].info.favorite == true end,
+        GetRecipeSchematic=function(id) return recipes[id] and recipes[id].schematic end,
+    }
+    Enum.CraftingReagentType = {Basic=1,Modifying=0}
+    return frame, scroll, form
+end
 Enum = {BagIndex = {ReagentBag = 4}, AuctionHouseSortOrder = {Price = 0},
     ItemCommodityStatus = {Unknown = 0, Item = 1, Commodity = 2}}
 C_Timer = {
@@ -245,11 +323,13 @@ function TooltipDataProcessor.AddTooltipPostCall(kind, callback)
 end
 function GameTooltip:GetProcessingTooltipInfo() return self.processingInfo end
 function GameTooltip:GetPrimaryTooltipInfo() return self.primaryInfo end
-function GameTooltip:AddDoubleLine(left, right)
-    self.lines = self.lines or {}; table.insert(self.lines, {left, right})
+function GameTooltip:ClearLines() self.lines = {} end
+function GameTooltip:AddDoubleLine(left, right, lr,lg,lb, rr,rg,rb)
+    self.lines = self.lines or {}; table.insert(self.lines, {left, right,
+        leftColor={lr or 1,lg or 1,lb or 1},rightColor={rr or 1,rg or 1,rb or 1}})
 end
-function GameTooltip:AddLine(text)
-    self.lines = self.lines or {}; table.insert(self.lines, {text})
+function GameTooltip:AddLine(text,r,g,b)
+    self.lines = self.lines or {}; table.insert(self.lines, {text,leftColor={r or 1,g or 1,b or 1}})
 end
 function MOCK.bagTooltip(itemID, bag)
     GameTooltip.lines = {}

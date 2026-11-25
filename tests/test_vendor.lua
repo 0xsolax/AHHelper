@@ -1,4 +1,4 @@
--- Only monitored items may enter the merchant-price cache. Operator: Solazhu.
+-- Merchant purchase prices persist independently of the watchlist. Operator: Solazhu.
 dofile(PROJECT_ROOT .. "/tests/wow_mock.lua")
 local A = {}
 for _, name in ipairs({"Libs/LibStub.lua","Libs/LibAHTab.lua","Logic.lua","Core.lua","History.lua",
@@ -13,6 +13,9 @@ local seed = A.Logic.Copy(A.profile.products)
 MerchantFrame = CreateFrame("Frame")
 function GetMerchantNumItems() return #MOCK.goods end
 function GetMerchantItemID(index) return MOCK.goods[index].itemID end
+local nativeUnitName=UnitName
+function UnitName(unit) if unit=="npc" then return MOCK.merchantName end; return nativeUnitName(unit) end
+function GetRealZoneText() return MOCK.merchantLocation end
 C_MerchantFrame = {GetItemInfo=function(index)
     MOCK.vendorReads = MOCK.vendorReads + 1
     return MOCK.goods[index].info
@@ -40,6 +43,7 @@ local function reset()
     A.profile.products,A.profile.nextID,A.profile.selectedID = A.Logic.Copy(seed),2,nil
     A.profile.vendorPrices,A.Native.post = {},nil
     MOCK.goods,MOCK.vendorReads,MOCK.serverTime = {offer(99,1),offer(3,9,5),offer(1,1)},0,1794450000
+    MOCK.merchantName,MOCK.merchantLocation="商人甲","暴风城"
     MOCK.queries,MOCK.postCalls,MOCK.messages,MOCK.menu = {},0,{},nil
     MerchantFrame:Show(); A.open = true; A.Market.Pause()
     A.Editor.Close(); A.Native.ShowMonitor(); MOCK.flush(); A.Select(1)
@@ -64,6 +68,76 @@ test("merchant capture reads prices only for monitored products and recipe mater
     eq(MOCK.vendorReads,2)
 end)
 
+test("equal and higher unit prices preserve the entire minimum record without refreshing",function()
+    event("MERCHANT_SHOW")
+    local saved=A.profile.vendorPrices[3]; local messages=#MOCK.messages
+    MOCK.serverTime=MOCK.serverTime+60; MOCK.merchantName,MOCK.merchantLocation="商人乙","铁炉堡"
+    local refresh,updates=A.RefreshUI,0; A.RefreshUI=function() updates=updates+1 end
+    MOCK.goods={offer(3,10,5)}; event("MERCHANT_SHOW")
+    A.RefreshUI=refresh
+    eq(A.profile.vendorPrices[3].price,9); eq(A.profile.vendorPrices[3],saved)
+    eq(saved.merchantName,"商人甲"); eq(saved.merchantLocation,"暴风城"); eq(saved.seenAt,1794450000)
+    eq(updates,0); eq(#MOCK.messages,messages)
+    MOCK.goods={offer(3,18,10)}; event("MERCHANT_UPDATE")
+    eq(A.profile.vendorPrices[3],saved); eq(saved.stackCount,5); eq(saved.stockSeenAt,1794450000)
+    eq(#MOCK.messages,messages)
+end)
+
+test("only a strictly lower unit price replaces price merchant location and observation time",function()
+    event("MERCHANT_SHOW")
+    local estimate=A.Estimate(A.Selected())
+    MOCK.serverTime=MOCK.serverTime+60; MOCK.merchantName,MOCK.merchantLocation="商人乙","铁炉堡"
+    MOCK.goods={offer(3,10,10)}; event("MERCHANT_SHOW")
+    local entry=A.profile.vendorPrices[3]
+    eq(entry.price,10); eq(entry.stackCount,10); eq(entry.merchantName,"商人乙")
+    eq(entry.merchantLocation,"铁炉堡"); eq(entry.seenAt,1794450060)
+    eq(estimate.materials[2].merchantName,"商人甲"); eq(estimate.materials[2].merchantLocation,"暴风城")
+    assert(A.UI.materialRows[2].help:find("铁炉堡 · 商人乙",1,true))
+    eq(A.Estimate(A.Selected()).materials[2].cost,5)
+end)
+
+test("minimum comparison preserves sub-copper differences across large bundle sizes",function()
+    MOCK.goods={offer(3,999999999999,100000)}; event("MERCHANT_SHOW")
+    MOCK.goods={offer(3,999989999999,99999)}; event("MERCHANT_SHOW")
+    local saved=A.profile.vendorPrices[3]
+    eq(saved.price,999989999999); eq(saved.stackCount,99999)
+    MOCK.goods={offer(3,999999999999,100000)}; event("MERCHANT_SHOW")
+    eq(A.profile.vendorPrices[3],saved)
+end)
+
+test("legacy minimum records do not invent a merchant or refresh at an equal price",function()
+    local saved={price=9,stackCount=5,seenAt=1794450000}
+    A.profile.vendorPrices[3]=saved
+    MOCK.serverTime=MOCK.serverTime+60; MOCK.goods={offer(3,9,5)}; event("MERCHANT_SHOW")
+    eq(A.profile.vendorPrices[3],saved); eq(saved.merchantName,nil); eq(saved.merchantLocation,nil)
+    assert(A.VendorSourceText(saved):find("未记录",1,true))
+    MOCK.goods={offer(3,8,5)}; event("MERCHANT_SHOW")
+    eq(A.profile.vendorPrices[3].merchantName,"商人甲")
+    AuctionPilotDB=A.Logic.Copy(AuctionPilotDB); A.profile=nil; A.Initialize()
+    eq(A.profile.vendorPrices[3].price,8); eq(A.profile.vendorPrices[3].merchantLocation,"暴风城")
+end)
+
+test("missing merchant metadata stays unknown instead of blocking a lower purchase price",function()
+    MOCK.merchantName,MOCK.merchantLocation=nil,nil
+    event("MERCHANT_SHOW")
+    local entry=A.profile.vendorPrices[3]
+    eq(entry.price,9); eq(entry.merchantName,nil); eq(entry.merchantLocation,nil)
+    assert(A.VendorSourceText(entry):find("未记录",1,true))
+end)
+
+test("legacy stock keeps historical attribution even when observations share a timestamp",function()
+    for _,stockTime in ipairs({1794449960,1794449900}) do
+        local saved={price=9,stackCount=5,seenAt=1794449900,numAvailable=0,stockSeenAt=stockTime}
+        A.profile.vendorPrices[3]=saved
+        MOCK.goods={offer(3,9,5)}; event("MERCHANT_SHOW")
+        eq(A.profile.vendorPrices[3],saved)
+        assert(A.VendorStockText(3):find("历史商店库存：已售罄",1,true),"legacy stock must keep its historical observation label")
+    end
+    MOCK.goods={offer(3,8,5)}; event("MERCHANT_UPDATE")
+    assert(A.VendorStockText(3):find("历史商店库存：不限量",1,true))
+    eq(A.profile.vendorPrices[3].stockSeenAt,A.profile.vendorPrices[3].seenAt)
+end)
+
 test("bundle purchase price is apportioned without confusing sellback or AH prices",function()
     event("MERCHANT_SHOW")
     A.quotes[3].at = MOCK.time - 5000
@@ -84,9 +158,9 @@ test("manual fixed prices win and monitored sale prices always come from the AH"
     A.quotes[1] = nil; assert(A.Estimate(A.Selected()).error)
 end)
 
-test("limited currency restricted incomplete and invalid offers are not automatic costs",function()
+test("currency restricted incomplete and invalid offers are not automatic costs",function()
     local cases = {
-        {numAvailable=0}, {numAvailable=3}, {hasExtendedCost=true}, {currencyID=7},
+        {numAvailable=-2}, {numAvailable=1.5}, {hasExtendedCost=true}, {currencyID=7},
         {spellID=7}, {isPurchasable=false}, {price=0}, {price=-1}, {price=0/0},
         {stackCount=0}, {stackCount=1.5}, {name=""},
     }
@@ -134,30 +208,30 @@ test("material detail and editor disclose merchant sourcing and allow a fixed ov
     A.Editor.Close()
 end)
 
-test("all saved alternate recipes are tracked and removing one prunes only its unique material",function()
+test("removing an alternate recipe retains its recorded merchant material prices",function()
     assert(A.SaveProduct({id=1,itemID=1,recipeName="备选",output=1,fee=5,extra=0,
         materials={{itemID=6,quantity=1,source="market"}}}))
     table.insert(MOCK.goods,offer(6,99)); event("MERCHANT_SHOW")
     eq(A.profile.vendorPrices[6].price,99); eq(A.profile.vendorPrices[3].price,9)
-    assert(A.DeleteRecipe(1,2)); eq(A.profile.vendorPrices[6],nil)
+    assert(A.DeleteRecipe(1,2)); eq(A.profile.vendorPrices[6].price,99)
     eq(A.profile.vendorPrices[3].price,9)
 end)
 
-test("product deletion keeps shared materials until their last monitored reference disappears",function()
+test("product deletion retains purchase prices and keeps previously recorded items observable",function()
     assert(A.SaveProduct({itemID=5,recipeName="共享材料",output=1,fee=5,extra=0,
         materials={{itemID=3,quantity=1,source="market"}}}))
     event("MERCHANT_SHOW"); A.DeleteProduct(1)
-    eq(A.profile.vendorPrices[1],nil); eq(A.profile.vendorPrices[3].price,9)
-    A.DeleteProduct(2); eq(next(A.profile.vendorPrices),nil)
-    MOCK.vendorReads = 0; event("MERCHANT_SHOW"); eq(MOCK.vendorReads,0)
+    eq(A.profile.vendorPrices[1].price,1); eq(A.profile.vendorPrices[3].price,9)
+    A.DeleteProduct(2); eq(A.profile.vendorPrices[3].price,9)
+    MOCK.vendorReads = 0; event("MERCHANT_SHOW"); eq(MOCK.vendorReads,2)
 end)
 
-test("editing materials prunes old prices and adding later requires a new merchant visit",function()
+test("editing materials retains old prices while a new material still needs a merchant observation",function()
     event("MERCHANT_SHOW")
     local input = A.Logic.Copy(A.Logic.RecipeInput(A.Selected(),A.SelectedRecipe()))
     input.id,input.recipeID,input.recipeName = 1,1,"默认配方"
     input.materials = {{itemID=7,quantity=1,source="market"}}
-    assert(A.SaveProduct(input)); eq(A.profile.vendorPrices[3],nil); eq(A.profile.vendorPrices[7],nil)
+    assert(A.SaveProduct(input)); eq(A.profile.vendorPrices[3].price,9); eq(A.profile.vendorPrices[7],nil)
     MOCK.goods = {offer(7,10)}; event("MERCHANT_SHOW"); eq(A.profile.vendorPrices[7].price,10)
 end)
 
@@ -292,4 +366,203 @@ test("tier budgets beyond precise currency arithmetic are withheld without chang
     eq(A.Estimate(A.Selected()).materials[2].cost,9)
 end)
 
-print(string.format("%d merchant-price tests passed",passed))
+local function resale(itemID, source, price)
+    return {itemID=itemID,recipeName="单品转售",output=1,fee=5,extra=0,materials={},
+        purchase={source=source or "vendor",price=price}}
+end
+
+local function chooseMode(text)
+    A.Editor.modeButton:Click()
+    for _, entry in ipairs(MOCK.menu.entries) do
+        if entry.text == text then entry:Click(); return end
+    end
+    error("Missing monitoring mode: " .. text)
+end
+
+test("single item resale saves without recipe materials and shares total-cost profit accounting",function()
+    local draft = resale(5)
+    assert(A.SaveProduct(draft))
+    local product, plan = A.Selected(), A.SelectedRecipe()
+    eq(#plan.materials,0); eq(plan.output,1); eq(plan.purchase.source,"vendor")
+    draft.purchase.source = "fixed"; eq(plan.purchase.source,"vendor")
+    MOCK.goods = {offer(5,1000)}; event("MERCHANT_SHOW"); snapshot(5,1200)
+    local result = A.Estimate(product)
+    eq(result.materialCost,1000); eq(result.fee,60); eq(result.cost,1060)
+    eq(result.profit,140); assert(math.abs(result.roi - 140/1060*100) < 0.000001)
+    eq(A.UI.productRows[product.id].sale:GetText(),"12银")
+    eq(A.UI.productRows[product.id].roi:GetText(),"13.2%")
+    eq(A.UI.materialRows[1].itemID,5); eq(A.UI.materialRows[1].unit:GetText(),"10银")
+    eq(A.UI.materialRows[2]:IsShown(),false)
+end)
+
+test("resale merchant cost is unknown before capture and fixed cost remains an explicit override",function()
+    assert(A.SaveProduct(resale(5))); snapshot(5,1200)
+    local result = A.Estimate(A.Selected())
+    assert(result.error:find("未记录商店价")); eq(result.profit,nil); eq(result.roi,nil)
+    local draft = resale(5,"fixed",1000)
+    draft.id,draft.recipeID = A.Selected().id,A.SelectedRecipe().id
+    assert(A.SaveProduct(draft))
+    MOCK.goods = {offer(5,800)}; event("MERCHANT_SHOW")
+    eq(A.Estimate(A.Selected()).profit,140)
+    A.quotes[5] = nil; eq(A.Estimate(A.Selected()).profit,nil)
+end)
+
+test("resale validation cannot turn broken sources or production quantities into a free purchase",function()
+    for _, purchase in ipairs({{}, {source="fixed"}, {source="fixed",price=-1}, {source="unknown"}, "bad"}) do
+        local draft = resale(5); draft.purchase = purchase
+        assert(not A.SaveProduct(draft)); eq(#A.profile.products,1)
+    end
+    local draft = resale(5); draft.output = 2; assert(not A.SaveProduct(draft))
+    draft.output = 1; draft.materials = {{itemID=3,quantity=1,source="fixed",price=0}}
+    assert(not A.SaveProduct(draft))
+    draft.purchase = nil; draft.materials[1].itemID = 5; assert(not A.SaveProduct(draft))
+    draft = resale(5,"fixed",0); assert(A.SaveProduct(draft)); snapshot(5,1200)
+    eq(A.Estimate(A.Selected()).profit,1140)
+end)
+
+test("new resale editor needs only a product and cost source and saves through the visible button",function()
+    local e = A.Editor
+    e.Open(); chooseMode("单品转售")
+    e.item.edit:SetFocus(); MOCK.shift = true
+    eq(ChatFrameUtil.InsertLink("item:5"),true); MOCK.shift = false
+    eq(e.item.itemID,5); eq(e.scroll:IsShown(),false); eq(e.import:IsShown(),false)
+    eq(e.output:IsShown(),false); eq(e.purchasePanel:IsShown(),true)
+    eq(e.purchase.source,"vendor"); eq(e.Read().output,1); eq(#e.Read().materials,0)
+    eq(e.save:GetText(),"保存监控"); e.save:Click()
+    eq(e.frame:IsShown(),false); eq(A.Selected().itemID,5)
+    eq(A.SelectedRecipe().purchase.source,"vendor"); eq(#MOCK.queries,0); eq(MOCK.postCalls,0)
+end)
+
+test("switching editor modes or cancelling preserves both unsaved craft inputs and saved recipes",function()
+    local e = A.Editor
+    e.Open(A.Selected()); e.output:SetText("3")
+    e.rows[1].quantity:SetText("7")
+    chooseMode("单品转售"); chooseSource(e.purchase,"固定价"); e.purchase.price:SetCopper(1000)
+    eq(e.Read().purchase.price,1000)
+    chooseMode("配方制作")
+    eq(e.Read().purchase,nil); eq(e.Read().output,3); eq(e.Read().materials[1].quantity,7)
+    chooseMode("单品转售"); eq(e.Read().purchase.price,1000)
+    e.Close(); eq(A.SelectedRecipe().purchase,nil); eq(A.SelectedRecipe().materials[1].quantity,2)
+end)
+
+test("resale cost dropdown preserves all four sources and merchant capture does not override AH choice",function()
+    assert(A.SaveProduct(resale(5))); snapshot(5,1200)
+    MOCK.goods = {offer(5,1000)}; event("MERCHANT_SHOW")
+    local e = A.Editor; e.Open(A.Selected())
+    chooseSource(e.purchase,"AH价"); eq(e.purchase.price:GetCopper(),1200)
+    eq(A.EstimateInput(e.Read()).profit,-60)
+    assert(A.SaveProduct(e.Read())); e.Close()
+    MOCK.goods[1].info.price = 800; event("MERCHANT_UPDATE")
+    eq(A.SelectedRecipe().purchase.source,"auction"); eq(A.Estimate(A.Selected()).profit,-60)
+    e.Open(A.Selected()); chooseSource(e.purchase,"自动（商店优先）")
+    eq(A.EstimateInput(e.Read()).profit,340)
+    chooseSource(e.purchase,"商店价"); eq(A.EstimateInput(e.Read()).profit,340); e.Close()
+end)
+
+test("craft and resale plans coexist under one product and keep existing recipe calculations",function()
+    local before = A.Estimate(A.Selected()).profit
+    local draft = resale(1,"fixed",1000); draft.id, draft.sourceRecipeID = 1,900
+    assert(A.SaveProduct(draft)); eq(#A.profile.products,1); eq(#A.Selected().recipes,2)
+    eq(A.SelectedRecipe().sourceRecipeID,nil)
+    eq(A.Estimate(A.Selected()).profit,8500)
+    A.Select(1,1); eq(A.Estimate(A.Selected()).profit,before)
+    A.Select(1,2); assert(A.DeleteRecipe(1,2))
+    eq(A.SelectedRecipe().purchase,nil); eq(A.Estimate(A.Selected()).profit,before)
+end)
+
+test("resale refresh queries the sale item once without manufacturing material queries or trades",function()
+    assert(A.SaveProduct(resale(5)))
+    assert(A.Market.RequestRefresh("all",A.Selected().id))
+    eq(#A.Market.queue,1); eq(A.Market.queue[1],5); A.Market.Pause(); A.RefreshUI()
+    A.UI.recipeRefresh:Click(); eq(#A.Market.queue,1); eq(A.Market.queue[1],5); A.Market.Pause(); A.RefreshUI()
+    A.UI.materialRows[1].refresh:Click(); eq(#A.Market.queue,1); eq(A.Market.queue[1],5)
+    eq(MOCK.postCalls,0); A.Market.Pause()
+end)
+
+test("resale detail opens the same item's native purchase page without buying",function()
+    assert(A.SaveProduct(resale(5))); snapshot(5,1200)
+    local selectedID = A.Selected().id
+    A.UI.materialRows[1]:Click(); MOCK.flush()
+    eq(AuctionHouseFrame.buyResult.itemKey.itemID,5)
+    eq(MOCK.purchaseCalls or 0,0); eq(MOCK.postCalls,0)
+    A.Native.ShowMonitor(); MOCK.flush()
+    eq(A.Selected().id,selectedID); eq(A.SelectedRecipe().purchase.source,"vendor")
+end)
+
+test("limited offers use the same watched-item filter and keep quantity with its observation time",function()
+    assert(A.SaveProduct(resale(5)))
+    MOCK.goods = {offer(5,1000),offer(99,1)}
+    MOCK.goods[1].info.numAvailable,MOCK.goods[2].info.numAvailable = 3,1
+    event("MERCHANT_SHOW"); snapshot(5,1200)
+    local entry = A.profile.vendorPrices[5]
+    eq(entry.price,1000); eq(entry.numAvailable,3); eq(entry.stockSeenAt,MOCK.serverTime)
+    eq(A.profile.vendorPrices[99],nil); eq(MOCK.vendorReads,1); eq(#MOCK.messages,1)
+    assert(A.VendorStockText(5):find("限量 3 件"))
+    assert(A.UI.vendorStock:GetText():find("限量 3 件"))
+    assert(A.UI.materialRows[1].help:find("历史商店库存"))
+    MOCK.serverTime = MOCK.serverTime + 60; MOCK.goods[1].info.numAvailable = 2
+    event("MERCHANT_UPDATE")
+    eq(A.profile.vendorPrices[5].numAvailable,3); eq(#MOCK.messages,1)
+    eq(A.profile.vendorPrices[5].stockSeenAt,MOCK.serverTime-60)
+    eq(A.Estimate(A.Selected()).profit,140)
+end)
+
+test("sold-out offers preserve the minimum record including its original observed stock",function()
+    assert(A.SaveProduct(resale(5))); snapshot(5,1200)
+    MOCK.goods = {offer(5,1000)}; MOCK.goods[1].info.numAvailable = 1
+    event("MERCHANT_SHOW")
+    local priceTime = A.profile.vendorPrices[5].seenAt
+    MOCK.serverTime = MOCK.serverTime + 60
+    MOCK.goods[1].info.numAvailable,MOCK.goods[1].info.isPurchasable,MOCK.goods[1].info.price = 0,false,0
+    event("MERCHANT_UPDATE")
+    local entry = A.profile.vendorPrices[5]
+    eq(entry.price,1000); eq(entry.seenAt,priceTime); eq(entry.numAvailable,1)
+    eq(entry.stockSeenAt,priceTime); eq(A.Estimate(A.Selected()).profit,140)
+    assert(A.UI.vendorStock:GetText():find("限量 1 件")); eq(#MOCK.messages,1)
+    A.Editor.Open(A.Selected()); assert(A.Editor.vendorStock:GetText():find("限量 1 件")); A.Editor.Close()
+    MOCK.goods = {}; event("MERCHANT_UPDATE")
+    eq(A.profile.vendorPrices[5].price,1000); eq(A.profile.vendorPrices[5].stockSeenAt,priceTime)
+    A.profile.vendorPrices[5] = nil
+    MOCK.goods = {offer(5,0)}
+    MOCK.goods[1].info.numAvailable,MOCK.goods[1].info.isPurchasable = 0,false
+    event("MERCHANT_SHOW"); eq(A.profile.vendorPrices[5],nil); eq(A.Estimate(A.Selected()).profit,nil)
+end)
+
+test("unreadable restricted and currency offers do not overwrite known stock or historical price",function()
+    assert(A.SaveProduct(resale(5)))
+    MOCK.goods = {offer(5,1000)}; MOCK.goods[1].info.numAvailable = 2; event("MERCHANT_SHOW")
+    local seenAt = MOCK.serverTime; MOCK.serverTime = seenAt + 60
+    MOCK.goods[1].info.numAvailable,MOCK.goods[1].info.isPurchasable = 0,false
+    MOCK.goods[1].info.hasExtendedCost = true; event("MERCHANT_UPDATE")
+    eq(A.profile.vendorPrices[5].numAvailable,2); eq(A.profile.vendorPrices[5].stockSeenAt,seenAt)
+    MOCK.goods[1].info = nil; event("MERCHANT_UPDATE")
+    eq(A.profile.vendorPrices[5].price,1000); eq(A.profile.vendorPrices[5].stockSeenAt,seenAt)
+    A.profile.vendorPrices[5] = {price=1000,stackCount=1,seenAt=seenAt}
+    assert(A.VendorStockText(5):find("库存未记录"))
+end)
+
+test("limited purchase prices survive removal of their last reference and subsequent reload",function()
+    assert(A.SaveProduct(resale(5)))
+    MOCK.goods = {offer(5,1000)}; MOCK.goods[1].info.numAvailable = 2; event("MERCHANT_SHOW")
+    AuctionPilotDB = A.Logic.Copy(AuctionPilotDB); A.profile = nil; A.Initialize()
+    eq(AuctionPilotDB.version,2); eq(A.SelectedRecipe().purchase.source,"vendor")
+    eq(A.profile.vendorPrices[5].numAvailable,2); eq(A.profile.vendorPrices[5].stockSeenAt,MOCK.serverTime)
+    A.DeleteProduct(A.Selected().id); eq(A.profile.vendorPrices[5].price,1000)
+    AuctionPilotDB = A.Logic.Copy(AuctionPilotDB); A.profile = nil; A.Initialize()
+    eq(A.profile.vendorPrices[5].price,1000); eq(A.profile.vendorPrices[5].numAvailable,2)
+    eq(A.profile.vendorPrices[5].seenAt,MOCK.serverTime)
+end)
+
+test("previously recorded merchant prices update after removal and reject invalid new offers",function()
+    event("MERCHANT_SHOW"); A.DeleteProduct(1)
+    local seenAt=MOCK.serverTime
+    MOCK.serverTime=seenAt+60; MOCK.goods={offer(3,8,5),offer(99,1)}
+    event("MERCHANT_SHOW")
+    eq(A.profile.vendorPrices[3].price,8); eq(A.profile.vendorPrices[3].seenAt,seenAt+60)
+    eq(A.profile.vendorPrices[99],nil)
+    MOCK.goods[1].info.hasExtendedCost=true; MOCK.goods[1].info.price=1
+    event("MERCHANT_UPDATE"); eq(A.profile.vendorPrices[3].price,8)
+    MOCK.goods={}; event("MERCHANT_UPDATE"); eq(A.profile.vendorPrices[3].price,8)
+end)
+
+print(string.format("%d merchant-price and resale tests passed",passed))

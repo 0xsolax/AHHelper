@@ -66,7 +66,7 @@ function U.OpenProductMenu(owner, productID)
     MenuUtil.CreateContextMenu(owner, function(_, menu)
         menu:SetScrollMode(300)
         menu:CreateTitle((A.ItemInfo(product.itemID)))
-        menu:CreateTitle("选用配方 · 净利润 / 件")
+        menu:CreateTitle("选用方案 · 净利润 / 件")
         for _, recipe in ipairs(product.recipes) do
             local recipeID, estimate = recipe.id, A.Estimate(product, recipe)
             local profit = estimate.error and "缺价" or (estimate.stale and "历史 " or "")
@@ -77,8 +77,8 @@ function U.OpenProductMenu(owner, productID)
             end, function() A.Select(productID, recipeID) end)
         end
         menu:CreateDivider()
-        menu:CreateButton("编辑当前配方", function() A.Editor.Open(A.Product(productID)) end)
-        menu:CreateButton("添加配方", function() A.Editor.Open(A.Product(productID), nil, true) end)
+        menu:CreateButton("编辑当前方案", function() A.Editor.Open(A.Product(productID)) end)
+        menu:CreateButton("添加方案", function() A.Editor.Open(A.Product(productID), nil, true) end)
         menu:CreateDivider()
         menu:CreateButton("移除产品", function() StaticPopup_Show("AUCTIONPILOT_DELETE", nil, nil, productID) end)
     end)
@@ -91,7 +91,7 @@ local function menuButton(parent, callback)
     button:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIcon-ScrollDown-Down")
     button:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight", "ADD")
     button:SetScript("OnClick", callback)
-    button:SetScript("OnEnter", function() showHelp(button, "切换配方、编辑或移除产品") end)
+    button:SetScript("OnEnter", function() showHelp(button, "切换方案、编辑或移除产品") end)
     button:SetScript("OnLeave", function() GameTooltip:Hide() end)
     return button
 end
@@ -105,6 +105,235 @@ local function refreshButton(parent, help, callback)
     button:HookScript("OnLeave", function() GameTooltip:Hide() end)
     return button
 end
+
+local function scanHistorical(record)
+    return record.historical or record.refreshError or not A.open or (record.at and A.Now()-record.at>A.ttl)
+end
+
+local function showScanHelp(owner, record, message, skipped)
+    GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
+    GameTooltip:ClearLines()
+    if record then
+        local draft, estimate = record.draft, record.estimate
+        GameTooltip:SetText((A.ItemInfo(draft.itemID)), 1, 1, 1)
+        local color = W.ProfitColor(estimate.unitProfit)
+        local profit = (estimate.unitProfit and estimate.unitProfit>0 and "+" or "") .. L.Money(estimate.unitProfit)
+        GameTooltip:AddDoubleLine("每件净利", profit, .75,.75,.72, color[1],color[2],color[3])
+        GameTooltip:AddDoubleLine("售价 / 件", L.Money(estimate.sale), .75,.75,.72, 1,1,1)
+        GameTooltip:AddDoubleLine("总成本 / 件（含手续费）", L.Money(estimate.unitCost), .75,.75,.72, 1,1,1)
+        if record.seenAt then GameTooltip:AddLine((scanHistorical(record) and "历史报价 " or "报价 ")
+            .. date("%m-%d %H:%M:%S",record.seenAt), .65,.65,.62) end
+        if draft.sourceOutputMax and draft.sourceOutputMax>draft.output then
+            GameTooltip:AddLine("按最低产量 " .. draft.output .. " 件估算，金额均为每件。", .65,.65,.62, true)
+        end
+        local error = record.refreshError or estimate.error
+        if error then GameTooltip:AddLine(error .. (record.refreshError and record.at and "；保留上次完整结果。" or ""), 1,.73,.28,true) end
+    else GameTooltip:SetText("尚未扫描这个配方。", 1,1,1) end
+    local note = skipped and skipped~="" and skipped or message
+    if note and note~="" then GameTooltip:AddLine(note, 1,.73,.28,true) end
+    GameTooltip:Show()
+end
+
+function U.ScanProfession(favorites)
+    local p, M = U.profession, A.Market
+    if not p or not A.Native.ProfessionVisible() then return nil, "请先打开专业制作页面并选择配方。" end
+    if not A.open then return nil, "请先打开拍卖行，再扫描配方。" end
+    if A.Editor.frame and A.Editor.frame:IsShown() then return nil, "请先保存或取消正在编辑的监控方案，再扫描。" end
+    if M.batch and M.batch.scan and (M.active or #M.queue > 0) then return nil, "正在扫描，请等待完成。" end
+    local drafts, skipped = {}, {}
+    if favorites then
+        local ids, err = A.Native.FavoriteRecipes()
+        if not ids then return nil, err end
+        for _, id in ipairs(ids) do
+            local draft, why = A.ReadRecipeScan(id)
+            if draft then drafts[#drafts + 1] = draft
+            else
+                skipped[#skipped + 1] = "#" .. id .. "：" .. why
+                if A.scanResults[id] then A.scanResults[id].historical, A.scanResults[id].refreshError = true, why end
+            end
+        end
+        if #drafts == 0 then return nil, #skipped > 0 and ("偏好配方暂不能扫描：" .. skipped[1]) or "当前专业没有标记为偏好的配方。" end
+    else
+        local draft, err = A.ReadRecipeScan()
+        if not draft then return nil, err end
+        drafts[1] = draft
+    end
+    M.Pause()
+    A.Native.ShowMonitor()
+    p.message = #skipped > 0 and ("跳过 " .. #skipped .. " 项；悬停查看原因") or ""
+    p.skipped = table.concat(skipped, "\n")
+    return M.RequestRecipes(drafts)
+end
+
+function U.RefreshProfessionRow(row)
+    local p = U.profession
+    if not p or not row.GetElementData then return end
+    local node = row:GetElementData()
+    local data = node and node.GetData and node:GetData()
+    local info = data and data.recipeInfo
+    if not info or not row.Label then
+        if row.auctionPilotProfit then row.auctionPilotProfit:Hide() end
+        row.auctionPilotRecipeID = nil
+        return
+    end
+    if Professions and Professions.GetHighestLearnedRecipe then info = Professions.GetHighestLearnedRecipe(info) or info end
+    row.auctionPilotRecipeID = info.recipeID
+    if not row.auctionPilotProfit then
+        row.auctionPilotProfit = W.Text(row, "", 11, W.muted, 78)
+        row.auctionPilotProfit:SetJustifyH("RIGHT"); row.auctionPilotProfit:SetWordWrap(false)
+        row:HookScript("OnLeave", function() GameTooltip:Hide() end)
+        if row.SetCraftableCount then hooksecurefunc(row, "SetCraftableCount", function() U.RefreshProfessionRow(row) end) end
+    end
+    local locked = row.LockedIcon and row.LockedIcon:IsShown() and row.LockedIcon:GetWidth() or 0
+    local count = row.Count and row.Count:IsShown() and row.Count:GetStringWidth() or 0
+    row.auctionPilotProfit:ClearAllPoints(); row.auctionPilotProfit:SetPoint("RIGHT", row, "RIGHT", -locked - 4, 0)
+    row.Label:SetWidth(math.max(24, math.min(row.Label:GetWidth(), row:GetWidth() - count - locked - 120)))
+    local record, label = A.scanResults[info.recipeID], row.auctionPilotProfit
+    if record and record.estimate.unitProfit then W.Amount(label, record.estimate.unitProfit, true)
+    else label:SetText(record and "无法测算" or "未扫描"); label:SetTextColor(unpack(W.muted)) end
+    if label:GetUnboundedStringWidth() > label:GetWidth() then label:SetText("悬停查看") end
+    label:Show()
+end
+
+-- Native row initialization replaces its OnEnter handler on every pool reuse.
+function U.InitializeProfessionRow(row)
+    U.RefreshProfessionRow(row)
+    if row.auctionPilotRecipeID then
+        row:HookScript("OnEnter", function()
+            if row.auctionPilotRecipeID then showScanHelp(row, A.scanResults[row.auctionPilotRecipeID]) end
+        end)
+    end
+end
+
+function U.RestoreProfessionSize()
+    local p = U.profession
+    if not p then return end
+    local form = p.page.SchematicForm
+    if p.appliedFormHeight and form:GetHeight() == p.appliedFormHeight then form:SetHeight(p.baseFormHeight) end
+    if p.appliedHeight and p.root:GetHeight() == p.appliedHeight then p.root:SetHeight(p.baseHeight) end
+    if p.appliedScale and p.root:GetScale() == p.appliedScale then p.root:SetScale(p.baseScale) end
+    p.appliedHeight, p.appliedScale, p.appliedFormHeight = nil, nil, nil
+end
+
+function U.LayoutProfessionScan()
+    local p = U.profession
+    if not p or p.layingOut or not A.Native.ProfessionVisible() then return end
+    p.layingOut = true
+    local page, form, root = p.page, p.page.SchematicForm, p.root
+    if not p.appliedHeight or root:GetHeight() ~= p.appliedHeight then p.baseHeight = root:GetHeight() end
+    if not p.appliedScale or root:GetScale() ~= p.appliedScale then p.baseScale = root:GetScale() end
+    if not p.appliedFormHeight or form:GetHeight() ~= p.appliedFormHeight then p.baseFormHeight = form:GetHeight() end
+    local scale = form:GetEffectiveScale()
+    local lowest = (form:GetTop() - 90) * scale
+    for _, key in ipairs({"Description","Reagents","OptionalReagents","FinishingReagents","Details",
+        "Cooldown","RecipeSourceButton","FirstCraftBonus","RecipeLevelBar"}) do
+        local child = form[key]
+        if child and child:IsShown() and child:GetBottom() then lowest = math.min(lowest, child:GetBottom() * child:GetEffectiveScale()) end
+    end
+    local top = (form:GetTop()*scale - lowest)/scale + 8
+    local width = math.max(180, form:GetWidth() - 32)
+    p.panel:SetWidth(width); p.panel:ClearAllPoints(); p.panel:SetPoint("TOPLEFT",form,"TOPLEFT",16,-top)
+    p.title:SetWidth(width - p.current:GetWidth() - p.favorites:GetWidth() - 38)
+    p.profit:SetWidth(width - 110); p.sale:SetWidth(width - 166); p.cost:SetWidth(width - 166)
+    p.time:SetWidth(width - 132); p.status:SetWidth(width - 132)
+    local reserve = 16
+    for _, key in ipairs({"TrackRecipeCheckbox","AllocateBestQualityCheckbox"}) do
+        local control = form[key]
+        if control and control:IsShown() and control:GetTop() then
+            reserve = math.max(reserve, (control:GetTop()*control:GetEffectiveScale() - form:GetBottom()*scale)/scale + 8)
+        end
+    end
+    local needed = math.max(p.baseFormHeight, math.ceil(top + p.panel:GetHeight() + reserve))
+    form:SetHeight(needed); p.appliedFormHeight = form:GetHeight()
+    p.appliedHeight = p.baseHeight + p.appliedFormHeight - p.baseFormHeight
+    root:SetHeight(p.appliedHeight)
+    p.appliedHeight = root:GetHeight()
+    p.appliedScale = math.min(p.baseScale, (UIParent:GetHeight()-44)/p.appliedHeight)
+    root:SetScale(p.appliedScale)
+    p.appliedScale = root:GetScale()
+    p.layingOut = nil
+end
+
+function U.RefreshProfessionScan()
+    local p = U.profession
+    if not p or not A.Native.ProfessionVisible() then return end
+    U.LayoutProfessionScan()
+    local M, batch = A.Market, A.Market.batch
+    local busy = batch and batch.scan and (M.active or #M.queue > 0)
+    local editing = A.Editor.frame and A.Editor.frame:IsShown()
+    p.current:SetEnabled(A.open and not busy and not editing); p.favorites:SetEnabled(A.open and not busy and not editing)
+    p.current:SetText(busy and "扫描中…" or "扫描当前配方")
+    p.page.RecipeList.ScrollBox:ForEachFrame(U.RefreshProfessionRow)
+    local info = A.Native.CurrentRecipe()
+    local record = info and A.scanResults[info.recipeID]
+    local estimate = record and record.estimate
+    p.title:SetText("利润 / 件")
+    if record then
+        W.Amount(p.sale, estimate.sale); W.Amount(p.cost, estimate.unitCost)
+        W.Amount(p.profit, estimate.unitProfit, true)
+        p.time:SetText((scanHistorical(record) and "历史 · " or "报价 ")
+            .. (record.seenAt and date("%H:%M:%S",record.seenAt) or "未完成"))
+    else
+        W.Amount(p.sale,nil); W.Amount(p.cost,nil); W.Amount(p.profit,nil,true)
+        p.time:SetText(not info and "请选择配方" or not A.open and "请先打开拍卖行" or "尚未扫描")
+    end
+    for _, label in ipairs({p.sale,p.cost,p.profit,p.time}) do
+        if label:GetUnboundedStringWidth() > label:GetWidth() then label:SetText("悬停查看") end
+    end
+    local watched = false
+    if info then
+        for _, product in ipairs(A.profile.products) do
+            for _, recipe in ipairs(product.recipes) do if recipe.sourceRecipeID == info.recipeID then watched = true end end
+        end
+    end
+    p.add:SetEnabled(record ~= nil and not watched and not busy and not editing); p.add:SetText(watched and "已在监控" or "加入监控")
+    local status = record and record.refreshError and (record.at and "刷新失败，保留上次结果" or "扫描失败，请重试")
+        or record and record.estimate.error and "暂不能测算，悬停查看"
+        or (p.message and p.message~="" and "提示：悬停查看") or ""
+    if busy then
+        local complete = 0; for _ in pairs(batch.scan.finished) do complete = complete + 1 end
+        status = M.draining and "等待上次查询结束" or M.waitSince and "等待拍卖行响应"
+            or ("扫描配方 " .. complete .. "/" .. #batch.scan.drafts)
+    end
+    if editing then status = "请先保存或取消编辑" end
+    fitName(p.status,status)
+    p.status:SetShown(status~=""); p.time:SetShown(status=="")
+end
+
+function U.BuildProfessionScan(page)
+    if U.profession and U.profession.page == page then return end
+    local p = {page=page,root=ProfessionsFrame,message=""}; U.profession = p
+    local function start(favorites)
+        local ok, err = U.ScanProfession(favorites)
+        if not ok then p.message = err; A.Message(err); U.RefreshProfessionScan() end
+    end
+    p.panel = W.Panel(page.SchematicForm,430,158)
+    p.current = W.Button(p.panel,"扫描当前配方",116,24,function() start(false) end)
+    p.current:SetPoint("TOPRIGHT",p.panel,"TOPRIGHT",-12,-6)
+    p.favorites = W.Button(p.panel,"扫描偏好",100,24,function() start(true) end)
+    p.favorites:SetPoint("RIGHT",p.current,"LEFT",-6,0)
+    p.title = W.Label(p.panel,"利润 / 件",12,10,13,W.gold,176); p.title:SetWordWrap(false)
+    W.Label(p.panel,"净利润",12,46,13,W.muted,80)
+    W.Label(p.panel,"售价",12,76,12,W.muted,80)
+    W.Label(p.panel,"总成本（含手续费）",12,98,12,W.muted,142)
+    p.profit = W.Text(p.panel,"--",22,W.muted,320); p.profit:SetPoint("TOPRIGHT",-12,-38)
+    p.sale = W.Text(p.panel,"--",14,W.text,264); p.sale:SetPoint("TOPRIGHT",-12,-73)
+    p.cost = W.Text(p.panel,"--",14,W.text,264); p.cost:SetPoint("TOPRIGHT",-12,-95)
+    for _,label in ipairs({p.profit,p.sale,p.cost}) do label:SetJustifyH("RIGHT"); label:SetWordWrap(false) end
+    p.add = W.Button(p.panel,"加入监控",100,24,function()
+        local info = A.Native.CurrentRecipe()
+        if info then local ok,err=A.AddRecipeScan(info.recipeID); p.message=not ok and err or ""; U.RefreshProfessionScan() end
+    end); p.add:SetPoint("TOPLEFT",12,-124)
+    p.time = W.Label(p.panel,"",120,130,11,W.muted,298); p.time:SetWordWrap(false)
+    p.status = W.Label(p.panel,"",120,130,11,W.amber,298); p.status:SetWordWrap(false)
+    p.panel:EnableMouse(true)
+    p.panel:SetScript("OnEnter",function()
+        local info=A.Native.CurrentRecipe()
+        showScanHelp(p.panel,info and A.scanResults[info.recipeID],p.message,p.skipped)
+    end)
+    p.panel:SetScript("OnLeave",function() GameTooltip:Hide() end)
+end
+
 
 local function productRow(productID)
     if U.productRows[productID] then return U.productRows[productID] end
@@ -163,7 +392,7 @@ function U.RefreshList()
         row:ClearAllPoints(); row:SetPoint("TOPLEFT", 0, -y); row:Show()
         local name, icon = A.ItemInfo(product.itemID)
         fitName(row.name, name); row.icon:SetTexture(icon)
-        fitName(row.recipe, recipe and recipe.name or "未选配方")
+        fitName(row.recipe, recipe and recipe.name or "未选方案")
         row.selected:SetShown(A.profile.selectedID == product.id)
         row.refresh:SetEnabled(ready())
         W.Amount(row.sale, estimate.sale); W.Amount(row.cost, estimate.unitCost)
@@ -184,20 +413,20 @@ function U.RefreshList()
         local alert = A.alerts[product.itemID]
         local alertText = alert and L.Fresh(quote, A.Now(), A.ttl) and A.AlertText(alert)
         row.alert:SetText(alertText and "!" or "")
-        row.help = name .. " · " .. (recipe and recipe.name or "未选配方") .. "\n" .. A.RecipeNote(recipe)
+        row.help = name .. " · " .. (recipe and recipe.name or "未选方案") .. "\n" .. A.RecipeNote(recipe)
             .. "\n售价 " .. L.Money(estimate.sale) .. " · 总成本 " .. L.Money(estimate.unitCost)
             .. " · 净利 " .. L.Money(estimate.unitProfit)
             .. "\n总成本利润率 " .. (estimate.roi and string.format("%.1f%%", estimate.roi) or "--")
             .. " · 报价时间 " .. (estimate.error and "待刷新 / 缺价" or A.AgeText(estimate.age))
             .. "\n" .. (estimate.error or (estimate.stale and "历史测算。" or "")
-                .. "总成本含材料、额外费用和手续费；总成本利润率 = 净利润 ÷ 总成本。"
-                .. "\n材料 " .. L.Money(estimate.materialCost / estimate.output)
+                .. "总成本含采购支出、额外费用和手续费；总成本利润率 = 净利润 ÷ 总成本。"
+                .. "\n采购 " .. L.Money(estimate.materialCost / estimate.output)
                 .. " · 额外费用 " .. L.Money(recipe.extra / recipe.output)
                 .. " · 手续费 " .. L.Money(estimate.fee / estimate.output) .. " / 件"
                 .. "\n时间为所用报价中最早的一项。")
             .. (estimate.refreshError and "\n" .. estimate.refreshError .. "；沿用上次完整报价作历史测算。" or "")
             .. (alertText and "\n" .. alertText or "") .. "\n\n" .. priceTimeHelp
-            .. "\n单击查看材料；右侧箭头切换或管理配方。"
+            .. "\n单击查看采购明细；右侧箭头切换或管理方案。"
         y = y + 44
     end
     -- Do not hide live rows on the age ticker: a native menu closes when its owner hides.
@@ -225,7 +454,7 @@ local function materialRow(index)
     row:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
     row:SetScript("OnClick", function() buyItem(row.itemID) end)
     row:SetScript("OnEnter", function()
-        showHelp(row, (row.help or "") .. (A.open and "\n点击打开该材料的购买页" or "\n请先打开拍卖行，再点击购买"))
+        showHelp(row, (row.help or "") .. (A.open and "\n点击打开该物品的购买页" or "\n请先打开拍卖行，再点击购买"))
     end)
     row:SetScript("OnLeave", function() GameTooltip:Hide() end)
     U.materialRows[index] = row
@@ -260,10 +489,11 @@ function U.RefreshDetail()
     U.detailMenu:SetEnabled(recipe ~= nil)
     U.recipeRefresh:SetEnabled(recipe ~= nil and ready())
     U.productLink:SetShown(product ~= nil and recipe ~= nil)
+    U.vendorStock:SetShown(recipe ~= nil and recipe.purchase ~= nil)
     local quote = product and A.quotes[product.itemID]
     U.usePrice:SetEnabled(A.open and L.Fresh(quote, A.Now(), A.ttl) and quote.levels[1] ~= nil)
     if not product or not recipe then
-        U.materialTitle:SetText("选择一套配方查看材料")
+        U.materialTitle:SetText("选择产品查看采购明细")
         U.recipeTitle:SetText("")
         U.profit:SetText("预计利润 --"); U.roi:SetText("总成本利润率 --")
         U.materialFoot:SetText("报价只在点击刷新按钮后更新。")
@@ -277,14 +507,16 @@ function U.RefreshDetail()
     U.productLink.icon:SetTexture(productIcon)
     U.materialTitle:SetText("")
     fitName(U.productLink.name, productName)
-    fitName(U.recipeTitle, recipe.name .. " · 每次产出 " .. recipe.output .. " 件")
-    for i, material in ipairs(recipe.materials) do
+    fitName(U.recipeTitle, recipe.name .. (recipe.purchase and " · 每件核算" or " · 每次产出 " .. recipe.output .. " 件"))
+    if recipe.purchase then U.vendorStock:SetText(A.VendorStockText(product.itemID)) end
+    local materials = L.InputMaterials(L.RecipeInput(product, recipe))
+    for i, material in ipairs(materials) do
         local row, info = materialRow(i), estimate.materials[i]
         local vendor = L.VendorPrice(material, A.profile.vendorPrices)
         row:Show(); row.itemID = material.itemID
         row.refresh:SetEnabled(ready())
         row.refresh.help = not L.UsesMarketPrice(material, A.profile.vendorPrices) and "刷新拍卖行参考价，悬停查看；采购成本不变"
-            or "只刷新该材料的拍卖行报价"
+            or "只刷新该物品的拍卖行报价"
         local name, icon = A.ItemInfo(material.itemID)
         fitName(row.name, name); row.icon:SetTexture(icon); row.quantity:SetText(tostring(material.quantity))
         W.Amount(row.unit, info and info.unit); W.Amount(row.cost, info and info.cost)
@@ -313,29 +545,31 @@ function U.RefreshDetail()
             label:SetTextColor(unpack(historical and W.amber or W.text))
             if label:GetUnboundedStringWidth() > label:GetWidth() then label:SetText("悬停查看") end
         end
-        row.help = name .. "\n" .. (info and info.error or vendor and "商店整组价格按材料用量分摊，费用向上取整至铜。"
-            or material.source == "fixed" and "按手填单价核算。" or "按需要的材料数量逐档核算采购支出。")
+        row.help = name .. "\n" .. (info and info.error or vendor and "商店整组价格按所需数量分摊，费用向上取整至铜。"
+            or material.source == "fixed" and "按手填单价核算。" or "按需要的数量逐档核算采购支出。")
             .. "\nAH 最低可买价 × 可买量：" .. marketText .. "（排除自己的挂单）"
             .. "\n整档采购额：" .. (budgetError or L.Money(tierCost))
             .. "；按 AH 该档单价计算，不使用配方采购均价，也不包含更贵档位。"
             .. "\n" .. (historical and "历史参考 · " or "") .. A.AgeText(age)
             .. (source and source.refreshError and "\n" .. source.refreshError .. "；保留上次完整报价。" or "")
         if material.source == "fixed" or vendor then
-            row.help = row.help .. (vendor and ("\n上次商店价 " .. L.Money(vendor.price) .. " / " .. vendor.stackCount
+            row.help = row.help .. (vendor and ("\n商店最低价 " .. L.Money(vendor.price) .. " / " .. vendor.stackCount
                 .. " 件 · " .. date("%m-%d %H:%M", vendor.seenAt))
                 or ("\n固定采购价 " .. L.Money(material.price)))
                 .. "，刷新拍卖行不会修改成本。"
         end
+        if vendor then row.help = row.help .. "\n" .. A.VendorSourceText(vendor)
+            .. "\n" .. A.VendorStockText(material.itemID) .. "；仅为历史观察，不保证当前有货。" end
         if info and info.error then row.cost:SetText("--"); row.cost:SetTextColor(unpack(W.amber)) end
     end
-    for i = #recipe.materials + 1, #U.materialRows do U.materialRows[i]:Hide() end
-    U.materials.content:SetHeight(math.max(78, #recipe.materials * 34))
+    for i = #materials + 1, #U.materialRows do U.materialRows[i]:Hide() end
+    U.materials.content:SetHeight(math.max(78, #materials * 34))
     U.profit:SetText((estimate.stale and "历史利润 " or "预计利润 ") .. L.Money(estimate.unitProfit) .. " / 件")
     U.profit:SetTextColor(unpack(estimate.stale and W.muted or W.ProfitColor(estimate.unitProfit)))
     U.roi:SetText("总成本利润率 " .. (estimate.roi and string.format("%.1f%%", estimate.roi) or "--"))
     U.roi:SetTextColor(unpack(estimate.stale and W.muted or W.ProfitColor(estimate.roi)))
-    U.materialFoot:SetText(estimate.error or "产量 " .. recipe.output .. " 件 · 抽成 " .. product.fee
-        .. "% · 额外费用 " .. L.Money(recipe.extra) .. " / 次")
+    U.materialFoot:SetText(estimate.error or (recipe.purchase and "单品转售" or "产量 " .. recipe.output .. " 件")
+        .. " · 抽成 " .. product.fee .. "% · 额外费用 " .. L.Money(recipe.extra) .. (recipe.purchase and " / 件" or " / 次"))
     if U.selectedChanged then
         U.price:SetCopper(L.Fresh(quote, A.Now(), A.ttl) and estimate.sale or nil)
         U.priceEdited = false; U.quantity:SetText("1"); U.selectedChanged = false; U.message:SetText("")
@@ -348,6 +582,7 @@ function U.RefreshDetail()
 end
 
 function U.Refresh()
+    U.RefreshProfessionScan()
     if not U.frame or not U.frame:IsShown() or not A.profile then return end
     for _, button in ipairs(U.nativeButtons) do button:SetEnabled(A.open) end
     U.refresh:SetEnabled(ready())
@@ -356,7 +591,7 @@ function U.Refresh()
     U.auto:SetEnabled(A.open and (A.Market.auto or ready()))
     local market, status = A.Market
     local active, batch = market.active, market.batch
-    if not A.open then status = "拍卖行未打开 · 可编辑产品和配方"
+    if not A.open then status = "拍卖行未打开 · 可编辑监控方案"
     elseif market.draining then status = "等待上次查询结束，再开始下一次采样"
     elseif batch and batch.stopped then status = batch.stopped
     elseif market.waitSince then status = "等待拍卖行限流恢复 · " .. math.floor(A.Now() - market.waitSince) .. "/30秒"
@@ -445,7 +680,7 @@ function U.Build()
     local list = W.Panel(U.main, 1084, 340); list:SetPoint("TOPLEFT")
     W.Label(list, "关注的产品", 16, 14, 21, W.gold)
     local add = W.Button(list, "+ 添加产品", 112, 28, function() A.Editor.Open() end); add:SetPoint("TOPLEFT", 156, -12)
-    W.Label(list, "按当前选用配方测算", 294, 21, 13, W.muted)
+    W.Label(list, "按当前选用方案测算", 294, 21, 13, W.muted)
     U.refresh = W.Button(list, "全部刷新", 112, 28, function() message(A.Market.RequestRefresh("all")) end)
     U.refresh:SetPoint("TOPRIGHT", -16, -12)
     U.auto = W.Button(list, "自动刷新：关", 144, 28, function() message(A.Market.SetAuto(not A.Market.auto)) end)
@@ -455,7 +690,7 @@ function U.Build()
     end)
     U.auto:SetScript("OnLeave", function() GameTooltip:Hide() end)
     W.Label(list, "产品", 22, 58, 13, W.gold)
-    W.Label(list, "当前配方", 216, 58, 13, W.gold)
+    W.Label(list, "当前方案", 216, 58, 13, W.gold)
     for _, spec in ipairs({{"售价 / 件", 324, 102}, {"总成本 / 件", 438, 98}, {"报价时间", 760, 84},
         {"售价采样时间", 854, 122}}) do
         local label = W.Label(list, spec[1], spec[2], 58, 13, W.gold, spec[3])
@@ -473,9 +708,9 @@ function U.Build()
         U.sortButtons[key] = button
     end
     U.list = W.Scroll(list, 1060, 238); U.list:SetPoint("TOPLEFT", 14, -86)
-    U.empty = W.Label(list, "添加产品并读取配方，再点「全部刷新」查看利润。\n\n每个产品一行，右侧箭头可切换和管理配方。", 80, 150, 16, W.muted, 900)
+    U.empty = W.Label(list, "添加产品，选择配方制作或单品转售，再点「全部刷新」查看利润。\n\n每个产品一行，右侧箭头可切换和管理方案。", 80, 150, 16, W.muted, 900)
     local materials = W.Panel(U.main, 740, 214); materials:SetPoint("TOPLEFT", 0, -352)
-    U.materialTitle = W.Label(materials, "选择一套配方查看材料", 16, 14, 18, W.gold, 650)
+    U.materialTitle = W.Label(materials, "选择产品查看采购明细", 16, 14, 18, W.gold, 650)
     U.productLink = CreateFrame("Button", nil, materials)
     U.productLink:SetSize(224, 32); U.productLink:SetPoint("TOPLEFT", 16, -8)
     U.productLink.icon = W.Icon(U.productLink, 24); U.productLink.icon:SetPoint("LEFT")
@@ -489,17 +724,18 @@ function U.Build()
     end)
     U.productLink:SetScript("OnLeave", function() GameTooltip:Hide() end)
     U.recipeTitle = W.Label(materials, "", 250, 17, 13, W.muted, 402); U.recipeTitle:SetWordWrap(false)
-    U.recipeRefresh = refreshButton(materials, "刷新当前配方的成品售价及材料", function()
+    U.recipeRefresh = refreshButton(materials, "刷新当前方案的售价及所需 AH 采购价", function()
         local product, recipe = A.Selected(), A.SelectedRecipe()
         if product and recipe then message(A.Market.RequestRefresh("all", product.id, recipe.id)) end
     end); U.recipeRefresh:SetPoint("TOPRIGHT", -48, -9)
     U.detailMenu = menuButton(materials, function(owner) U.OpenProductMenu(owner, A.profile.selectedID) end)
     U.detailMenu:SetPoint("TOPRIGHT", -12, -8)
-    for _, header in ipairs({{"材料", 16}, {"用量", 174}, {"小计", 216}, {"采购均价", 308},
+    for _, header in ipairs({{"采购物品", 16}, {"用量", 174}, {"小计", 216}, {"采购均价", 308},
         {"最低档数量", 400}, {"整档采购额", 480}, {"时间/来源", 584}}) do
         W.Label(materials, header[1], header[2], 50, 12, W.gold)
     end
     U.materials = W.Scroll(materials, 710, 78); U.materials:SetPoint("TOPLEFT", 14, -73)
+    U.vendorStock = W.Label(materials, "", 16, 122, 13, W.muted, 690)
     U.profit = W.Label(materials, "预计利润 --", 16, 165, 15, W.green, 300)
     U.roi = W.Label(materials, "总成本利润率 --", 336, 165, 14, W.green, 370)
     U.materialFoot = W.Label(materials, "", 16, 190, 12, W.muted, 708)
@@ -561,9 +797,11 @@ function U.Build()
     U.status = W.Label(frame, "", 22, 701, 11, W.muted, 780)
     U.freshness = W.Text(frame, "", 11, W.muted); U.freshness:SetPoint("BOTTOMRIGHT", -22, 9)
     A.Editor.Build(body)
+    A.Editor.frame:HookScript("OnShow", U.RefreshProfessionScan)
     root:SetScript("OnShow", function() U.Layout(); U.Refresh() end)
     root:SetScript("OnHide", function()
         A.Market.Pause()
+        U.RefreshProfessionScan()
         C_Timer.After(0, function()
             if not A.open or root:IsShown() or not AuctionHouseFrame or not AuctionHouseFrame:IsShown()
                 or AuctionHouseFrame:GetDisplayMode() then return end
