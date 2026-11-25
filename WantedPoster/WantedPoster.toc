@@ -1,0 +1,11 @@
+## Interface: 16001
+## Title: 通缉令
+## Notes: 手动记录玩家姓名，按登录分组查找单人或整页。
+## Author: Solazhu
+## Version: 0.1.7-test
+## SavedVariablesPerCharacter: WantedPosterDB
+
+Roster.lua
+Macros.lua
+Panel.lua
+Core.lua
